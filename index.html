@@ -112,6 +112,7 @@ let flashFrames = 0;
 let greenFrames = 0;
 let jumpHeld    = false; // variable jump: true while jump key is held
 let jumpBoost   = 0;     // remaining frames of upward boost
+let pendingDitchBonus = false; // true when player jumped over a ditch, clears on landing
 let player      = {};
 let obstacles   = [];
 let ditches     = [];
@@ -163,6 +164,34 @@ function playStep() {
     src.connect(filter); filter.connect(gain); gain.connect(ac.destination);
     gain.gain.setValueAtTime(0.18, ac.currentTime);
     src.start(ac.currentTime);
+  } catch(e) {}
+}
+
+function playPunch() {
+  try {
+    const ac = getAC();
+    const t = ac.currentTime;
+    // Low thud: short sine burst at ~80 Hz dropping fast
+    const osc = ac.createOscillator();
+    const gain = ac.createGain();
+    osc.connect(gain); gain.connect(ac.destination);
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(160, t);
+    osc.frequency.exponentialRampToValueAtTime(40, t + 0.12);
+    gain.gain.setValueAtTime(0.5, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
+    osc.start(t); osc.stop(t + 0.15);
+    // High crack: noise burst layered on top
+    const bufLen = Math.floor(ac.sampleRate * 0.03);
+    const buf = ac.createBuffer(1, bufLen, ac.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < bufLen; i++) data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / bufLen, 2);
+    const src = ac.createBufferSource();
+    src.buffer = buf;
+    const g2 = ac.createGain();
+    src.connect(g2); g2.connect(ac.destination);
+    g2.gain.setValueAtTime(0.3, t);
+    src.start(t);
   } catch(e) {}
 }
 
@@ -268,9 +297,10 @@ function initLevel() {
   invFrames   = 0;
   flashFrames = 0;
   greenFrames = 0;
-  jumpHeld    = false;
-  jumpBoost   = 0;
-  obstacles   = [];
+  jumpHeld          = false;
+  jumpBoost         = 0;
+  pendingDitchBonus = false;
+  obstacles         = [];
   ditches     = [];
   popups      = [];
   player = { x: PLAYER_X, y: GROUND_Y, vy: 0, onGround: true, runT: 0 };
@@ -298,14 +328,25 @@ function update() {
   player.y  += player.vy;
   player.onGround = false;          // reset every frame, set below if touching surface
 
-  // Is the player's center over a ditch? (8px grace at each edge)
-  const overDitch = ditches.some(d => player.x > d.x + 8 && player.x < d.x + d.w - 8);
+  // Is the player over a ditch? Once below ground level, keep falling regardless
+  // (ditch may scroll past before player falls far enough otherwise)
+  const aboveDitch = ditches.some(d => player.x > d.x + 8 && player.x < d.x + d.w - 8);
+  const overDitch  = prevY > GROUND_Y || aboveDitch;
+
+  // While airborne over a ditch, mark that a bonus is pending
+  if (aboveDitch && !player.onGround) pendingDitchBonus = true;
 
   // Ground landing — only when not over a ditch
   if (!overDitch && player.y >= GROUND_Y) {
     player.y    = GROUND_Y;
     player.vy   = 0;
     player.onGround = true;
+    // Reward ditch crossing exactly on landing
+    if (pendingDitchBonus) {
+      pendingDitchBonus = false;
+      score += 20;
+      popups.push({ x: player.x, y: player.y - 60, text: '+20', life: 55, color: '#a0e060' });
+    }
   }
 
   // Fell into ditch (past bottom of screen)
@@ -370,9 +411,17 @@ function update() {
   spawnCD--;
   if (spawnCD <= 0) spawnNext(cfg);
 
+  // Spawn finish flag so it arrives at player position right as level ends
+  const flagArrivalFrame = LEVEL_FRAMES - 15;
+  const flagTravelFrames = Math.ceil((W + 20 - PLAYER_X) / cfg.speed);
+  if (frame === flagArrivalFrame - flagTravelFrames) {
+    obstacles.push({ x: W + 20, type: 'flag' });
+  }
+
   // Collision
   if (invFrames === 0) {
     for (const o of obstacles) {
+      if (o.type === 'flag') continue;
       if (!overlaps(player, o)) continue;
       if (o.type === 'box') {
         // Only a side-hit damages: player must not be jumping UP (vy<0)
@@ -467,6 +516,7 @@ function stomp(o) {
   const prev = score;
   score += 100;
   o.x = -600;
+  playPunch();
   player.vy = JUMP_VY * 0.6; // bounce off lion
 
   popups.push({ x: cx, y: cy, text: '+100', life: 55, color: '#FFD700' });
@@ -652,6 +702,33 @@ function drawObstacles() {
       ctx.fillStyle = '#E8A060';
       ctx.fillRect(o.x, o.y, o.w, 3);
       ctx.fillRect(o.x, o.y,   3, o.h);
+    } else if (o.type === 'flag') {
+      const px = o.x;
+      const base = GROUND_Y;
+      const poleH = 110;
+      // Pole
+      ctx.fillStyle = '#aaa';
+      ctx.fillRect(px - 2, base - poleH, 4, poleH);
+      // Waving flag banner (checkered finish flag)
+      const fw = 36, fh = 24;
+      const fy = base - poleH;
+      const cols = 4, rows = 3;
+      const cw = fw / cols, ch = fh / rows;
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          ctx.fillStyle = (r + c) % 2 === 0 ? '#fff' : '#222';
+          ctx.fillRect(px + 2 + c * cw, fy + r * ch, cw, ch);
+        }
+      }
+      // Flag border
+      ctx.strokeStyle = '#666';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(px + 2, fy, fw, fh);
+      // Base ball
+      ctx.fillStyle = '#888';
+      ctx.beginPath();
+      ctx.arc(px, base, 5, 0, Math.PI * 2);
+      ctx.fill();
     } else {
       // Lion emoji
       ctx.font      = `${o.h}px serif`;
