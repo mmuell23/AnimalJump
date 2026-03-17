@@ -1,0 +1,850 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tierabenteuer</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0a0a1a;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      user-select: none;
+      overflow: hidden;
+    }
+    canvas {
+      display: block;
+      max-width: 100vw;
+      max-height: 100vh;
+      border-radius: 16px;
+      box-shadow: 0 0 60px rgba(255, 160, 50, 0.3);
+    }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+'use strict';
+
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+const W = canvas.width  = 800;
+const H = canvas.height = 450;
+
+const GROUND_Y    = H - 80;
+const PLAYER_X    = 130;
+const PLAYER_SIZE = 52;
+const GRAVITY     = 0.65;
+const JUMP_VY     = -15;
+const LEVEL_FRAMES = 2400;
+
+// ── Pre-render static assets ──────────────────────────────────────────────────
+// Stars background (drawn once, reused every frame on select screen)
+const starsBg = document.createElement('canvas');
+starsBg.width = W; starsBg.height = H;
+(function () {
+  const sc = starsBg.getContext('2d');
+  const g = sc.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#0d1b3e');
+  g.addColorStop(1, '#1a1a3e');
+  sc.fillStyle = g;
+  sc.fillRect(0, 0, W, H);
+  for (let i = 0; i < 70; i++) {
+    const sx = (i * 139 + 11) % W;
+    const sy = (i * 71  +  7) % Math.round(H * 0.65);
+    const sr = (i % 4 === 0) ? 1.8 : 1;
+    sc.fillStyle = `rgba(255,255,255,${0.3 + (i % 3) * 0.15})`;
+    sc.beginPath();
+    sc.arc(sx, sy, sr, 0, Math.PI * 2);
+    sc.fill();
+  }
+})();
+
+// ── Data ──────────────────────────────────────────────────────────────────────
+const ANIMALS = [
+  { name: 'Fuchs'  },
+  { name: 'Hund'   },
+  { name: 'Katze'  },
+  { name: 'Esel'   },
+  { name: 'Wolf'   },
+];
+
+const LEVEL_CFG = [
+  { speed: 3.5, spawnLo: 105, spawnHi: 185, lionRatio: 0.12,
+    sky1: '#5fa8d3', sky2: '#b8e0ff', ground: '#5a9a3a', dirt: '#7a5c28',
+    sunColor: '#FFD700', sunGlow: 'rgba(255,220,80,' },
+  { speed: 4.5, spawnLo:  88, spawnHi: 158, lionRatio: 0.22,
+    sky1: '#87CEEB', sky2: '#C9EAFF', ground: '#4a8a2a', dirt: '#6a4c1a',
+    sunColor: '#FFD700', sunGlow: 'rgba(255,220,80,' },
+  { speed: 5.5, spawnLo:  70, spawnHi: 130, lionRatio: 0.35,
+    sky1: '#e07540', sky2: '#ffc060', ground: '#8B7355', dirt: '#5C3A18',
+    sunColor: '#FF8C00', sunGlow: 'rgba(255,140,0,' },
+  { speed: 6.5, spawnLo:  54, spawnHi: 108, lionRatio: 0.48,
+    sky1: '#b03000', sky2: '#ff6a1a', ground: '#6B3A1A', dirt: '#3E1E00',
+    sunColor: '#FF4500', sunGlow: 'rgba(255,80,0,' },
+  { speed: 8.0, spawnLo:  40, spawnHi:  86, lionRatio: 0.62,
+    sky1: '#5c0000', sky2: '#bb1800', ground: '#3a1000', dirt: '#1e0000',
+    sunColor: '#ff2200', sunGlow: 'rgba(255,40,0,' },
+];
+
+// ── State ─────────────────────────────────────────────────────────────────────
+let gs          = 'select'; // 'select'|'playing'|'levelend'|'gameover'|'win'
+let selAnimal   = 0;
+let level       = 1;
+let lives       = 3;
+let score       = 0;
+let frame       = 0;
+let spawnCD     = 90;
+let gScroll     = 0;   // ground scroll (wraps, for dirt stripes)
+let hillOff     = 0;   // hill scroll (continuous, no wrap — fixes flicker bug)
+let invFrames   = 0;
+let flashFrames = 0;   // red flash on hit
+let greenFrames = 0;   // green flash on life gained
+let player      = {};
+let obstacles   = [];
+let popups      = []; // floating score texts
+let clouds      = [
+  { x: 90,  y: 55,  r: 55 },
+  { x: 330, y: 42,  r: 40 },
+  { x: 570, y: 72,  r: 65 },
+  { x: 730, y: 38,  r: 34 },
+];
+
+// ── Input ─────────────────────────────────────────────────────────────────────
+function tryJump() {
+  if (gs === 'playing' && player.onGround) {
+    player.vy = JUMP_VY;
+    player.onGround = false;
+  }
+}
+
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space' || e.code === 'ArrowUp') {
+    e.preventDefault();
+    if      (gs === 'playing')              tryJump();
+    else if (gs === 'levelend')             advanceLevel();
+    else if (gs === 'gameover' || gs === 'win') gs = 'select';
+  }
+  if (e.code === 'Enter') {
+    if      (gs === 'levelend')             advanceLevel();
+    else if (gs === 'gameover' || gs === 'win') gs = 'select';
+  }
+});
+
+canvas.addEventListener('click', e => {
+  const r  = canvas.getBoundingClientRect();
+  handleClick((e.clientX - r.left) * W / r.width,
+              (e.clientY - r.top)  * H / r.height);
+});
+
+canvas.addEventListener('touchend', e => {
+  e.preventDefault();
+  const r  = canvas.getBoundingClientRect();
+  const t  = e.changedTouches[0];
+  handleClick((t.clientX - r.left) * W / r.width,
+              (t.clientY - r.top)  * H / r.height);
+}, { passive: false });
+
+function handleClick(mx, my) {
+  if (gs === 'playing')                      { tryJump(); return; }
+  if (gs === 'levelend')                     { advanceLevel(); return; }
+  if (gs === 'gameover' || gs === 'win')     { gs = 'select'; return; }
+  if (gs === 'select') {
+    const cards = getCardRects();
+    for (let i = 0; i < 5; i++) {
+      const c = cards[i];
+      if (mx >= c.x && mx <= c.x + c.w && my >= c.y && my <= c.y + c.h) {
+        selAnimal = i; return;
+      }
+    }
+    const sb = getStartBtn();
+    if (mx >= sb.x && mx <= sb.x + sb.w && my >= sb.y && my <= sb.y + sb.h) {
+      startGame();
+    }
+  }
+}
+
+// ── Layout helpers ────────────────────────────────────────────────────────────
+function getCardRects() {
+  const cw = 90, ch = 115, gap = 10;
+  const sx = (W - (5 * cw + 4 * gap)) / 2;
+  const sy = H / 2 - 60;
+  return ANIMALS.map((_, i) => ({ x: sx + i * (cw + gap), y: sy, w: cw, h: ch }));
+}
+
+function getStartBtn() {
+  return { x: W / 2 - 95, y: H / 2 + 100, w: 190, h: 54 };
+}
+
+// ── Game logic ────────────────────────────────────────────────────────────────
+function startGame() {
+  level = 1;
+  lives = 3;
+  score = 0;
+  initLevel();
+  gs = 'playing';
+}
+
+function initLevel() {
+  frame       = 0;
+  spawnCD     = 90;
+  gScroll     = 0;
+  hillOff     = 0;
+  invFrames   = 0;
+  flashFrames = 0;
+  greenFrames = 0;
+  obstacles   = [];
+  popups      = [];
+  player = { x: PLAYER_X, y: GROUND_Y, vy: 0, onGround: true, runT: 0 };
+  for (const c of clouds) c.x = [90, 330, 570, 730][clouds.indexOf(c)];
+}
+
+function advanceLevel() {
+  if (level >= 5) { gs = 'win'; return; }
+  level++;
+  initLevel();
+  gs = 'playing';
+}
+
+function update() {
+  if (gs !== 'playing') return;
+
+  const cfg = LEVEL_CFG[level - 1];
+  frame++;
+  gScroll = (gScroll + cfg.speed) % 50;
+  hillOff += cfg.speed * 0.3; // continuous — no modulo, so no jump-back flicker
+
+  // Player physics
+  player.vy += GRAVITY;
+  player.y  += player.vy;
+  if (player.y >= GROUND_Y) {
+    player.y      = GROUND_Y;
+    player.vy     = 0;
+    player.onGround = true;
+  }
+  if (player.onGround) player.runT += 0.038;
+
+  // Clouds
+  for (const c of clouds) {
+    c.x -= cfg.speed * 0.25;
+    if (c.x + c.r * 2.5 < 0) c.x = W + c.r * 2;
+  }
+
+  // Timers
+  if (invFrames   > 0) invFrames--;
+  if (flashFrames > 0) flashFrames--;
+  if (greenFrames > 0) greenFrames--;
+
+  // Update floating popups
+  for (const p of popups) { p.y -= 1.5; p.life--; }
+  popups = popups.filter(p => p.life > 0);
+
+  // Spawn obstacles
+  spawnCD--;
+  if (spawnCD <= 0) {
+    const isLion = Math.random() < cfg.lionRatio;
+    const h = isLion ? 62 : 46;
+    const w = isLion ? 58 : 44;
+    obstacles.push({ x: W + 20, y: GROUND_Y - h, w, h, type: isLion ? 'lion' : 'box' });
+    spawnCD = cfg.spawnLo + Math.random() * (cfg.spawnHi - cfg.spawnLo);
+  }
+
+  // Move & cull obstacles
+  for (const o of obstacles) o.x -= cfg.speed;
+  obstacles = obstacles.filter(o => o.x > -130);
+
+  // Collision
+  if (invFrames === 0) {
+    for (const o of obstacles) {
+      if (overlaps(player, o)) {
+        // Stomp: player falling onto top of lion
+        if (o.type === 'lion' && !player.onGround && player.vy > 0) {
+          stomp(o);
+        } else {
+          hit(o);
+        }
+        break;
+      }
+    }
+  }
+
+  if (frame >= LEVEL_FRAMES) gs = 'levelend';
+}
+
+function overlaps(p, o) {
+  const m = 11;
+  return (p.x - PLAYER_SIZE / 2 + m) < (o.x + o.w - m) &&
+         (p.x + PLAYER_SIZE / 2 - m) > (o.x + m) &&
+         (p.y - PLAYER_SIZE + m)     < (o.y + o.h - m) &&
+         (p.y - m)                   > (o.y + m);
+}
+
+function stomp(o) {
+  const cx   = o.x + o.w / 2;
+  const cy   = o.y;
+  const prev = score;
+  score += 100;
+  o.x = -600;
+  player.vy = JUMP_VY * 0.6; // bounce off lion
+
+  popups.push({ x: cx, y: cy, text: '+100', life: 55, color: '#FFD700' });
+
+  // Every 1000 points → +1 life
+  if (Math.floor(score / 1000) > Math.floor(prev / 1000)) {
+    lives = Math.min(lives + 1, 9);
+    greenFrames = 35;
+    popups.push({ x: W / 2, y: H / 2 - 20, text: '❤️ +1 Leben!', life: 90, color: '#ff6b6b' });
+  }
+}
+
+function hit(o) {
+  o.x = -600;
+  lives--;
+  invFrames   = 110;
+  flashFrames = 18;
+  if (lives <= 0) gs = 'gameover';
+}
+
+// ── Drawing ───────────────────────────────────────────────────────────────────
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+
+  if (gs === 'select') { drawSelect(); return; }
+
+  drawBackground();
+  drawObstacles();
+  drawPlayer();
+  drawPopups();
+  drawHUD();
+
+  // Screen flash effects
+  if (flashFrames > 0) {
+    ctx.fillStyle = `rgba(255,0,0,${flashFrames * 0.045})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+  if (greenFrames > 0) {
+    ctx.fillStyle = `rgba(0,220,80,${greenFrames * 0.04})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  if (gs === 'levelend') {
+    drawOverlay(`🎉 Level ${level} geschafft!`,
+      level >= 5 ? '▶ Weiter' : `▶ Level ${level + 1}`,
+      `Punkte: ${score}`);
+  } else if (gs === 'gameover') {
+    drawOverlay('💀 Game Over', '🔄 Nochmal spielen',
+      `Level ${level} · ${score} Punkte`);
+  } else if (gs === 'win') {
+    drawOverlay('🏆 Du hast gewonnen!', '🎮 Nochmal spielen',
+      `${ANIMALS[selAnimal].name} · ${score} Punkte`);
+  }
+}
+
+// ── Background ────────────────────────────────────────────────────────────────
+function drawBackground() {
+  const cfg = LEVEL_CFG[level - 1];
+
+  // Sky gradient
+  const sg = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+  sg.addColorStop(0, cfg.sky1);
+  sg.addColorStop(1, cfg.sky2);
+  ctx.fillStyle = sg;
+  ctx.fillRect(0, 0, W, GROUND_Y);
+
+  // Sun glow — layered circles instead of shadowBlur (no GPU flicker)
+  const sunX = W - 80, sunY = 58;
+  const sunR = level >= 4 ? 26 : 32;
+  for (let i = 5; i >= 1; i--) {
+    ctx.fillStyle = cfg.sunGlow + (0.06 * i) + ')';
+    ctx.beginPath();
+    ctx.arc(sunX, sunY, sunR + i * 10, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.fillStyle = cfg.sunColor;
+  ctx.beginPath();
+  ctx.arc(sunX, sunY, sunR, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Clouds
+  for (const c of clouds) drawCloud(c.x, c.y, c.r, level >= 4);
+
+  // Scrolling hills (levels 1–2) — hillOff is continuous, no modulo wrap-jump
+  if (level <= 2) {
+    ctx.fillStyle = 'rgba(80,140,60,0.30)';
+    const ho = hillOff % 200;
+    for (let hx = -ho; hx < W + 200; hx += 200) {
+      ctx.beginPath();
+      ctx.arc(hx + 100, GROUND_Y, 90, Math.PI, 0);
+      ctx.fill();
+    }
+  }
+
+  // Ground
+  ctx.fillStyle = cfg.ground;
+  ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
+
+  // Ground edge line
+  ctx.fillStyle = 'rgba(0,0,0,0.18)';
+  ctx.fillRect(0, GROUND_Y, W, 4);
+}
+
+function drawCloud(x, y, r, dark) {
+  ctx.fillStyle = dark ? 'rgba(180,60,40,0.45)' : 'rgba(255,255,255,0.80)';
+  ctx.beginPath();
+  ctx.arc(x,            y,     r,        0, Math.PI * 2);
+  ctx.arc(x + r * 0.80, y + 5, r * 0.65, 0, Math.PI * 2);
+  ctx.arc(x - r * 0.70, y + 8, r * 0.60, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+// ── Obstacles ─────────────────────────────────────────────────────────────────
+function drawObstacles() {
+  for (const o of obstacles) {
+    if (o.type === 'box') {
+      // Drop shadow (CSS-style offset, not ctx.shadowBlur)
+      ctx.fillStyle = 'rgba(0,0,0,0.22)';
+      ctx.fillRect(o.x + 5, o.y + o.h, o.w, 6);
+
+      // Body gradient
+      const bg = ctx.createLinearGradient(o.x, o.y, o.x + o.w, o.y + o.h);
+      bg.addColorStop(0, '#C87941');
+      bg.addColorStop(1, '#7A4420');
+      ctx.fillStyle = bg;
+      ctx.fillRect(o.x, o.y, o.w, o.h);
+
+      // Cross stripes
+      ctx.fillStyle = '#5C3010';
+      ctx.fillRect(o.x + o.w / 2 - 2, o.y,              4,    o.h);
+      ctx.fillRect(o.x,                o.y + o.h / 2 - 2, o.w,  4);
+
+      // Highlight edge
+      ctx.fillStyle = '#E8A060';
+      ctx.fillRect(o.x, o.y, o.w, 3);
+      ctx.fillRect(o.x, o.y,   3, o.h);
+    } else {
+      // Lion emoji
+      ctx.font      = `${o.h}px serif`;
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#fff';
+      ctx.fillText('🦁', o.x + o.w / 2, o.y + o.h);
+
+      // Warning badge
+      ctx.fillStyle = '#ff2222';
+      ctx.beginPath();
+      ctx.arc(o.x + o.w / 2, o.y - 13, 10, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = 'white';
+      ctx.font      = 'bold 14px Arial';
+      ctx.fillText('!', o.x + o.w / 2, o.y - 8);
+    }
+  }
+}
+
+// ── Animal sprites ────────────────────────────────────────────────────────────
+// Coord system: (0,0) = feet on ground, y-negative = up, animal faces RIGHT
+// sw1/sw2 = foot displacement in px for each leg pair (opposite phase)
+// jump = true when airborne → fixed pose instead of stride animation
+
+function _l(hx, hy, sw) { // single leg: hip→foot as gentle curve
+  ctx.beginPath();
+  ctx.moveTo(hx, hy);
+  ctx.quadraticCurveTo(hx + sw * 0.4, hy * 0.4, hx + sw, 0);
+  ctx.stroke();
+}
+
+function drawFox(sw1, sw2, jump) {
+  const F='#E55A15', D='#B83D00', C='#F5E0C0', P='#FFB0A0';
+  ctx.lineWidth=5; ctx.lineCap='round'; ctx.strokeStyle=D;
+  _l(-11, -15, jump ? -9 : sw1); _l(-7, -15, jump ? -5 : sw2);
+  _l(  8, -15, jump ?  7 : sw2); _l(12, -15, jump ? 11 : sw1);
+  // Tail
+  ctx.strokeStyle=F; ctx.lineWidth=9; ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(-18,-20); ctx.bezierCurveTo(-32,-18,-38,-36,-26,-46); ctx.stroke();
+  ctx.strokeStyle='#eee'; ctx.lineWidth=5;
+  ctx.beginPath(); ctx.moveTo(-28,-42); ctx.lineTo(-24,-47); ctx.stroke();
+  // Body
+  ctx.fillStyle=F; ctx.beginPath(); ctx.ellipse(0,-24,21,11,0,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle=C; ctx.beginPath(); ctx.ellipse(4,-21,11,7,0.2,0,Math.PI*2); ctx.fill();
+  // Head
+  ctx.fillStyle=F; ctx.beginPath(); ctx.arc(17,-33,11,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle=C; ctx.beginPath(); ctx.ellipse(24,-29,7,5,0.1,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#222'; ctx.beginPath(); ctx.ellipse(29,-29,2.5,2,0,0,Math.PI*2); ctx.fill();
+  // Eye
+  ctx.fillStyle='#111'; ctx.beginPath(); ctx.arc(20,-35,2,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(21,-36,0.8,0,Math.PI*2); ctx.fill();
+  // Ears
+  ctx.fillStyle=F;
+  ctx.beginPath(); ctx.moveTo(9,-41); ctx.lineTo(6,-55); ctx.lineTo(17,-43); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(18,-43); ctx.lineTo(21,-56); ctx.lineTo(26,-43); ctx.closePath(); ctx.fill();
+  ctx.fillStyle=P;
+  ctx.beginPath(); ctx.moveTo(10,-42); ctx.lineTo(8,-52); ctx.lineTo(16,-44); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(19,-44); ctx.lineTo(21,-53); ctx.lineTo(25,-44); ctx.closePath(); ctx.fill();
+}
+
+function drawDog(sw1, sw2, jump) {
+  const F='#C48B2F', D='#8B6020', C='#F0D8A0';
+  ctx.lineWidth=6; ctx.lineCap='round'; ctx.strokeStyle=D;
+  _l(-11, -15, jump ? -10 : sw1); _l(-7, -15, jump ? -6 : sw2);
+  _l(  8, -15, jump ?   8 : sw2); _l(12, -15, jump ? 12 : sw1);
+  // Tail (wagging up)
+  ctx.strokeStyle=F; ctx.lineWidth=8; ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(-17,-22); ctx.bezierCurveTo(-28,-15,-33,-28,-26,-38); ctx.stroke();
+  // Body
+  ctx.fillStyle=F; ctx.beginPath(); ctx.ellipse(0,-23,22,12,0,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle=C; ctx.beginPath(); ctx.ellipse(4,-20,12,7,0.2,0,Math.PI*2); ctx.fill();
+  // Head
+  ctx.fillStyle=F; ctx.beginPath(); ctx.arc(17,-33,13,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle=C; ctx.beginPath(); ctx.ellipse(27,-29,8,6,0.1,0,Math.PI*2); ctx.fill();
+  // Tongue
+  ctx.fillStyle='#E05070'; ctx.beginPath(); ctx.ellipse(31,-24,3,4,0.1,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#333'; ctx.beginPath(); ctx.ellipse(33,-29,3,2.5,0,0,Math.PI*2); ctx.fill();
+  // Eye
+  ctx.fillStyle='#111'; ctx.beginPath(); ctx.arc(22,-36,2.5,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(23,-37,1,0,Math.PI*2); ctx.fill();
+  // Floppy ears
+  ctx.fillStyle=D;
+  ctx.beginPath(); ctx.moveTo(9,-43); ctx.lineTo(5,-26); ctx.lineTo(14,-25); ctx.lineTo(18,-42); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(19,-43); ctx.lineTo(25,-26); ctx.lineTo(30,-28); ctx.lineTo(26,-43); ctx.closePath(); ctx.fill();
+}
+
+function drawCat(sw1, sw2, jump) {
+  const F='#888', D='#555', C='#EEE', P='#FFB0C0';
+  ctx.lineWidth=4; ctx.lineCap='round'; ctx.strokeStyle=D;
+  _l(-10, -14, jump ? -7 : sw1); _l(-6, -14, jump ? -4 : sw2);
+  _l(  7, -14, jump ?  6 : sw2); _l(11, -14, jump ?  8 : sw1);
+  // Tail (curling up)
+  ctx.strokeStyle=F; ctx.lineWidth=6; ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(-17,-20); ctx.bezierCurveTo(-32,-18,-40,-30,-28,-50); ctx.stroke();
+  // Body (slimmer)
+  ctx.fillStyle=F; ctx.beginPath(); ctx.ellipse(-1,-22,18,10,0,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle=C; ctx.beginPath(); ctx.ellipse(3,-19,9,6,0.2,0,Math.PI*2); ctx.fill();
+  // Stripes
+  ctx.strokeStyle=D; ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.moveTo(-10,-14); ctx.lineTo(-12,-26); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-4,-13);  ctx.lineTo(-5,-25);  ctx.stroke();
+  // Head
+  ctx.fillStyle=F; ctx.beginPath(); ctx.arc(15,-32,12,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle=C; ctx.beginPath(); ctx.ellipse(22,-28,6,5,0,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle=P; ctx.beginPath(); ctx.arc(26,-28,2,0,Math.PI*2); ctx.fill();
+  // Eye (green cat eye with slit pupil)
+  ctx.fillStyle='#3A3'; ctx.beginPath(); ctx.ellipse(19,-33,2.5,3,0,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#111'; ctx.beginPath(); ctx.ellipse(19,-33,1,2.5,0,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(20,-34,0.8,0,Math.PI*2); ctx.fill();
+  // Whiskers
+  ctx.strokeStyle='rgba(0,0,0,0.35)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(22,-27); ctx.lineTo(36,-25); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(22,-29); ctx.lineTo(36,-29); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(22,-31); ctx.lineTo(36,-33); ctx.stroke();
+  // Ears
+  ctx.fillStyle=F;
+  ctx.beginPath(); ctx.moveTo(6,-40);  ctx.lineTo(3,-55);  ctx.lineTo(15,-42); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(16,-42); ctx.lineTo(20,-56); ctx.lineTo(24,-43); ctx.closePath(); ctx.fill();
+  ctx.fillStyle=P;
+  ctx.beginPath(); ctx.moveTo(7,-41);  ctx.lineTo(5,-51);  ctx.lineTo(14,-43); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(17,-43); ctx.lineTo(20,-52); ctx.lineTo(23,-44); ctx.closePath(); ctx.fill();
+}
+
+function drawDonkey(sw1, sw2, jump) {
+  const F='#B8B8B8', D='#707070', C='#E8D8C0', M='#555';
+  ctx.lineWidth=7; ctx.lineCap='round'; ctx.strokeStyle=D;
+  _l(-12, -18, jump ? -10 : sw1); _l(-7, -18, jump ?  -6 : sw2);
+  _l(  8, -18, jump ?   8 : sw2); _l(13, -18, jump ?  12 : sw1);
+  // Short tail with tuft
+  ctx.strokeStyle=D; ctx.lineWidth=5; ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(-21,-21); ctx.lineTo(-31,-14); ctx.stroke();
+  ctx.lineWidth=2;
+  for (const a of [-0.5, 0, 0.5]) {
+    ctx.beginPath(); ctx.moveTo(-31,-14);
+    ctx.lineTo(-31 + Math.cos(a)*8, -14 + Math.sin(a)*8); ctx.stroke();
+  }
+  // Body (stocky)
+  ctx.fillStyle=F; ctx.beginPath(); ctx.ellipse(0,-24,24,13,0,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle=C; ctx.beginPath(); ctx.ellipse(3,-21,15,8,0.1,0,Math.PI*2); ctx.fill();
+  // Mane
+  ctx.strokeStyle=M; ctx.lineWidth=4; ctx.lineCap='round';
+  for (let mx=5; mx<=15; mx+=4) {
+    ctx.beginPath(); ctx.moveTo(mx,-33); ctx.lineTo(mx-1,-41); ctx.stroke();
+  }
+  // Head (elongated — faces RIGHT)
+  ctx.fillStyle=F; ctx.beginPath(); ctx.ellipse(19,-33,15,11,0.15,0,Math.PI*2); ctx.fill();
+  // Large muzzle
+  ctx.fillStyle=C; ctx.beginPath(); ctx.ellipse(31,-29,9,7,0.1,0,Math.PI*2); ctx.fill();
+  // Nostrils
+  ctx.fillStyle='#888';
+  ctx.beginPath(); ctx.arc(29,-27,1.5,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(34,-27,1.5,0,Math.PI*2); ctx.fill();
+  // Eye
+  ctx.fillStyle='#222'; ctx.beginPath(); ctx.arc(23,-37,2.5,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(24,-38,1,0,Math.PI*2); ctx.fill();
+  // LONG ears (donkey signature)
+  ctx.fillStyle=F;
+  ctx.beginPath(); ctx.ellipse(12,-53,5,17,-0.1,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(21,-53,5,17, 0.15,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle=C;
+  ctx.beginPath(); ctx.ellipse(12,-53,3,13,-0.1,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(21,-53,3,13, 0.15,0,Math.PI*2); ctx.fill();
+}
+
+function drawWolf(sw1, sw2, jump) {
+  const F='#607080', D='#3A4A58', L='#C8D4E0', C='#E0DDD8';
+  ctx.lineWidth=5; ctx.lineCap='round'; ctx.strokeStyle=D;
+  _l(-11, -16, jump ? -8 : sw1); _l(-7, -16, jump ? -5 : sw2);
+  _l(  8, -16, jump ?  7 : sw2); _l(12, -16, jump ? 10 : sw1);
+  // Tail (bushy, held low)
+  ctx.strokeStyle=F; ctx.lineWidth=11; ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(-18,-20); ctx.bezierCurveTo(-28,-16,-34,-8,-28,-2); ctx.stroke();
+  ctx.strokeStyle=L; ctx.lineWidth=5;
+  ctx.beginPath(); ctx.moveTo(-30,-5); ctx.lineTo(-27,-1); ctx.stroke();
+  // Body (lean)
+  ctx.fillStyle=F; ctx.beginPath(); ctx.ellipse(2,-24,22,10,0,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle=L; ctx.beginPath(); ctx.ellipse(4,-21,14,6,0.1,0,Math.PI*2); ctx.fill();
+  // Head
+  ctx.fillStyle=F; ctx.beginPath(); ctx.arc(19,-33,11,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle=C; ctx.beginPath(); ctx.ellipse(28,-30,8,5,0.15,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#222'; ctx.beginPath(); ctx.ellipse(34,-30,2.5,2,0,0,Math.PI*2); ctx.fill();
+  // Eye (yellow)
+  ctx.fillStyle='#D4AA00'; ctx.beginPath(); ctx.arc(22,-36,2.5,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#111';    ctx.beginPath(); ctx.arc(22.5,-36,1.2,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#fff';    ctx.beginPath(); ctx.arc(23,-37,0.7,0,Math.PI*2); ctx.fill();
+  // Ears (pointed)
+  ctx.fillStyle=F;
+  ctx.beginPath(); ctx.moveTo(11,-41); ctx.lineTo(8,-57);  ctx.lineTo(20,-44); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(21,-44); ctx.lineTo(25,-58); ctx.lineTo(28,-44); ctx.closePath(); ctx.fill();
+  ctx.fillStyle=D;
+  ctx.beginPath(); ctx.moveTo(12,-42); ctx.lineTo(10,-53); ctx.lineTo(19,-45); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(22,-45); ctx.lineTo(25,-54); ctx.lineTo(27,-45); ctx.closePath(); ctx.fill();
+}
+
+const DRAW_FUNS = [drawFox, drawDog, drawCat, drawDonkey, drawWolf];
+
+function drawAnimalSprite(cx, groundY, idx, runT, onGround) {
+  const t    = runT * Math.PI * 2;
+  const sw1  = onGround ? Math.sin(t) * 11 : 0;
+  const bob  = onGround ? Math.sin(t * 2) * 1.5 : 0; // subtle up-down on each step
+  ctx.save();
+  ctx.translate(cx, groundY + bob);
+  DRAW_FUNS[idx](sw1, -sw1, !onGround);
+  ctx.restore();
+}
+
+// ── Player ────────────────────────────────────────────────────────────────────
+function drawPlayer() {
+  if (invFrames > 0 && Math.floor(invFrames / 7) % 2 === 1) return;
+  drawAnimalSprite(player.x, player.y, selAnimal, player.runT, player.onGround);
+}
+
+// ── Floating score popups ─────────────────────────────────────────────────────
+function drawPopups() {
+  for (const p of popups) {
+    ctx.globalAlpha = Math.min(1, p.life / 25);
+    ctx.fillStyle   = p.color;
+    ctx.font        = p.text.length > 5 ? 'bold 22px Arial' : 'bold 26px Arial';
+    ctx.textAlign   = 'center';
+    ctx.fillText(p.text, p.x, p.y);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ── HUD helpers ───────────────────────────────────────────────────────────────
+function drawHeart(x, y, r, color) {
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(x, y + r * 0.4);
+  ctx.bezierCurveTo(x,           y - r * 0.5, x - r * 1.4, y - r * 0.5, x - r * 1.4, y + r * 0.2);
+  ctx.bezierCurveTo(x - r * 1.4, y + r,       x,           y + r * 1.5, x,            y + r * 1.5);
+  ctx.bezierCurveTo(x,           y + r * 1.5, x + r * 1.4, y + r,       x + r * 1.4,  y + r * 0.2);
+  ctx.bezierCurveTo(x + r * 1.4, y - r * 0.5, x,           y - r * 0.5, x,            y + r * 0.4);
+  ctx.fill();
+}
+
+// ── HUD ───────────────────────────────────────────────────────────────────────
+function drawHUD() {
+  // Lives (drawn hearts — no emoji rendering)
+  for (let i = 0; i < Math.max(lives, 3); i++) {
+    drawHeart(18 + i * 32, 20, 11, i < lives ? '#e74c3c' : '#444');
+  }
+
+  // Score (center top)
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  rrect(W / 2 - 70, 8, 140, 36, 8); ctx.fill();
+  ctx.fillStyle = '#f5c842';
+  ctx.font      = 'bold 18px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText(`★ ${score}`, W / 2, 33);
+
+  // Level badge (top right)
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  rrect(W - 118, 8, 110, 36, 8); ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font      = 'bold 17px Arial';
+  ctx.textAlign = 'right';
+  ctx.fillText(`Level ${level} / 5`, W - 12, 33);
+
+  // Progress bar
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fillRect(14, H - 22, W - 28, 10);
+  ctx.fillStyle = level >= 4 ? '#e74c3c' : '#27ae60';
+  ctx.fillRect(14, H - 22, (W - 28) * Math.min(frame / LEVEL_FRAMES, 1), 10);
+
+  ctx.fillStyle = 'rgba(255,255,255,0.45)';
+  ctx.font      = '11px Arial';
+  ctx.textAlign = 'right';
+  ctx.fillText('Ziel ▶', W - 14, H - 26);
+}
+
+// ── Overlays ──────────────────────────────────────────────────────────────────
+function drawOverlay(title, btnLabel, sub) {
+  ctx.fillStyle = 'rgba(0,0,0,0.72)';
+  ctx.fillRect(0, 0, W, H);
+
+  const bw = 440, bh = sub ? 238 : 210;
+  const bx = W / 2 - bw / 2;
+  const by = H / 2 - bh / 2;
+
+  ctx.fillStyle   = '#10102a';
+  ctx.strokeStyle = '#f5c842';
+  ctx.lineWidth   = 3;
+  rrect(bx, by, bw, bh, 20);
+  ctx.fill(); ctx.stroke();
+
+  ctx.fillStyle = '#f5c842';
+  ctx.font      = 'bold 32px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText(title, W / 2, by + 58);
+
+  if (sub) {
+    ctx.fillStyle = '#ccc';
+    ctx.font      = '19px Arial';
+    ctx.fillText(sub, W / 2, by + 100);
+  }
+
+  const bby = by + bh - 64;
+  ctx.fillStyle = '#218a45';
+  rrect(W / 2 - 115, bby, 230, 48, 12); ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font      = 'bold 20px Arial';
+  ctx.fillText(btnLabel, W / 2, bby + 32);
+
+  ctx.fillStyle = '#555';
+  ctx.font      = '13px Arial';
+  ctx.fillText('Klick oder ENTER zum Fortfahren', W / 2, by + bh + 22);
+}
+
+// ── Select screen ─────────────────────────────────────────────────────────────
+function drawSelect() {
+  // Pre-rendered star background (no per-frame arc calls)
+  ctx.drawImage(starsBg, 0, 0);
+
+  // Title — outline instead of shadowBlur
+  ctx.font        = 'bold 50px Arial';
+  ctx.textAlign   = 'center';
+  ctx.strokeStyle = '#7a5200';
+  ctx.lineWidth   = 5;
+  ctx.strokeText('🌟 Tierabenteuer 🌟', W / 2, 76);
+  ctx.fillStyle   = '#f5c842';
+  ctx.fillText('🌟 Tierabenteuer 🌟', W / 2, 76);
+
+  ctx.fillStyle = '#dde';
+  ctx.font      = '20px Arial';
+  ctx.fillText('Wähle dein Tier und starte das Abenteuer!', W / 2, 118);
+
+  // Animal cards
+  const cards = getCardRects();
+  for (let i = 0; i < 5; i++) {
+    const c   = cards[i];
+    const sel = i === selAnimal;
+
+    // Card offset shadow (rect, not shadowBlur)
+    ctx.fillStyle = sel ? 'rgba(243,156,18,0.35)' : 'rgba(0,0,0,0.3)';
+    ctx.fillRect(c.x + 4, c.y + 4, c.w, c.h);
+
+    ctx.fillStyle   = sel ? '#2d4a22' : '#1e2a4a';
+    ctx.strokeStyle = sel ? '#f5c842' : '#3a4a6a';
+    ctx.lineWidth   = sel ? 3 : 1.5;
+    rrect(c.x, c.y, c.w, c.h, 12);
+    ctx.fill(); ctx.stroke();
+
+    // Canvas-drawn animal (static mid-stride pose)
+    ctx.save();
+    ctx.translate(c.x + c.w / 2, c.y + 91);
+    ctx.scale(0.76, 0.76);
+    DRAW_FUNS[i](6, -6, false);
+    ctx.restore();
+
+    ctx.fillStyle = sel ? '#f5c842' : '#99aacc';
+    ctx.font      = sel ? 'bold 15px Arial' : '14px Arial';
+    ctx.fillText(ANIMALS[i].name, c.x + c.w / 2, c.y + 100);
+
+    if (sel) {
+      ctx.fillStyle = '#f5c842';
+      ctx.font      = 'bold 17px Arial';
+      ctx.fillText('✓', c.x + c.w / 2, c.y + 17);
+    }
+  }
+
+  // Start button — colored border instead of shadowBlur
+  const sb = getStartBtn();
+  // Outer glow ring (opaque rect offset, cheap alternative)
+  ctx.fillStyle = 'rgba(39,174,96,0.30)';
+  rrect(sb.x - 4, sb.y - 4, sb.w + 8, sb.h + 8, 18); ctx.fill();
+
+  ctx.fillStyle   = '#218a45';
+  ctx.strokeStyle = '#2ecc71';
+  ctx.lineWidth   = 2;
+  rrect(sb.x, sb.y, sb.w, sb.h, 14);
+  ctx.fill(); ctx.stroke();
+
+  ctx.fillStyle = '#fff';
+  ctx.font      = 'bold 24px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText('▶  Spielen!', W / 2, sb.y + 36);
+
+  // Controls hint
+  const dotY = sb.y + sb.h + 28;
+  ctx.fillStyle = 'rgba(255,255,255,0.4)';
+  ctx.font      = '13px Arial';
+  ctx.fillText('5 Level  ·  3 Leben  ·  Leertaste / Klick / Tap = Springen', W / 2, dotY);
+  ctx.fillText('Auf Löwen springen = +100 Punkte  ·  1000 Punkte = +1 Leben', W / 2, dotY + 20);
+
+  // Difficulty dots
+  const dotStartX = W / 2 - 60;
+  for (let i = 0; i < 5; i++) {
+    const ratio = (i + 1) / 5;
+    ctx.fillStyle = `hsl(${120 - ratio * 120}, 80%, 55%)`;
+    ctx.beginPath();
+    ctx.arc(dotStartX + i * 30, dotY + 42, 7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.font      = 'bold 9px Arial';
+    ctx.fillText(i + 1, dotStartX + i * 30, dotY + 46);
+  }
+  ctx.fillStyle = 'rgba(255,255,255,0.3)';
+  ctx.font      = '11px Arial';
+  ctx.fillText('Schwierigkeit', W / 2, dotY + 62);
+}
+
+// ── Utility ───────────────────────────────────────────────────────────────────
+function rrect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y,     x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x,     y + h, r);
+  ctx.arcTo(x,     y + h, x,     y,     r);
+  ctx.arcTo(x,     y,     x + w, y,     r);
+  ctx.closePath();
+}
+
+// ── Game loop ─────────────────────────────────────────────────────────────────
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>
