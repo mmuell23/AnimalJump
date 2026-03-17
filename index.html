@@ -72,22 +72,29 @@ const ANIMALS = [
   { name: 'Wolf'   },
 ];
 
+// ditchWMax = 70% of max jump distance (speed × airtime ~46 frames) → always crossable
+// gapLo/Hi: pixel gap between spawned elements (converted to frames via /speed)
 const LEVEL_CFG = [
-  { speed: 3.5, spawnLo: 105, spawnHi: 185, lionRatio: 0.12,
-    sky1: '#5fa8d3', sky2: '#b8e0ff', ground: '#5a9a3a', dirt: '#7a5c28',
-    sunColor: '#FFD700', sunGlow: 'rgba(255,220,80,' },
-  { speed: 4.5, spawnLo:  88, spawnHi: 158, lionRatio: 0.22,
-    sky1: '#87CEEB', sky2: '#C9EAFF', ground: '#4a8a2a', dirt: '#6a4c1a',
-    sunColor: '#FFD700', sunGlow: 'rgba(255,220,80,' },
-  { speed: 5.5, spawnLo:  70, spawnHi: 130, lionRatio: 0.35,
-    sky1: '#e07540', sky2: '#ffc060', ground: '#8B7355', dirt: '#5C3A18',
-    sunColor: '#FF8C00', sunGlow: 'rgba(255,140,0,' },
-  { speed: 6.5, spawnLo:  54, spawnHi: 108, lionRatio: 0.48,
-    sky1: '#b03000', sky2: '#ff6a1a', ground: '#6B3A1A', dirt: '#3E1E00',
-    sunColor: '#FF4500', sunGlow: 'rgba(255,80,0,' },
-  { speed: 8.0, spawnLo:  40, spawnHi:  86, lionRatio: 0.62,
-    sky1: '#5c0000', sky2: '#bb1800', ground: '#3a1000', dirt: '#1e0000',
-    sunColor: '#ff2200', sunGlow: 'rgba(255,40,0,' },
+  { speed: 3.5, lionRatio: 0.12, gapLo: 130, gapHi: 240,
+    sky1: '#5fa8d3', sky2: '#b8e0ff', ground: '#5a9a3a',
+    sunColor: '#FFD700', sunGlow: 'rgba(255,220,80,',
+    ditchWMin: 60, ditchWMax: 108 },
+  { speed: 4.5, lionRatio: 0.22, gapLo: 115, gapHi: 220,
+    sky1: '#87CEEB', sky2: '#C9EAFF', ground: '#4a8a2a',
+    sunColor: '#FFD700', sunGlow: 'rgba(255,220,80,',
+    ditchWMin: 65, ditchWMax: 138 },
+  { speed: 5.5, lionRatio: 0.35, gapLo: 100, gapHi: 200,
+    sky1: '#e07540', sky2: '#ffc060', ground: '#8B7355',
+    sunColor: '#FF8C00', sunGlow: 'rgba(255,140,0,',
+    ditchWMin: 70, ditchWMax: 168 },
+  { speed: 6.5, lionRatio: 0.48, gapLo:  88, gapHi: 180,
+    sky1: '#b03000', sky2: '#ff6a1a', ground: '#6B3A1A',
+    sunColor: '#FF4500', sunGlow: 'rgba(255,80,0,',
+    ditchWMin: 75, ditchWMax: 196 },
+  { speed: 8.0, lionRatio: 0.62, gapLo:  75, gapHi: 160,
+    sky1: '#5c0000', sky2: '#bb1800', ground: '#3a1000',
+    sunColor: '#ff2200', sunGlow: 'rgba(255,40,0,',
+    ditchWMin: 80, ditchWMax: 238 },
 ];
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -97,14 +104,17 @@ let level       = 1;
 let lives       = 3;
 let score       = 0;
 let frame       = 0;
-let spawnCD     = 90;
-let gScroll     = 0;   // ground scroll (wraps, for dirt stripes)
-let hillOff     = 0;   // hill scroll (continuous, no wrap — fixes flicker bug)
+let spawnCD     = 160; // unified spawn stream cooldown
+let gScroll     = 0;
+let hillOff     = 0;
 let invFrames   = 0;
-let flashFrames = 0;   // red flash on hit
-let greenFrames = 0;   // green flash on life gained
+let flashFrames = 0;
+let greenFrames = 0;
+let jumpHeld    = false; // variable jump: true while jump key is held
+let jumpBoost   = 0;     // remaining frames of upward boost
 let player      = {};
 let obstacles   = [];
+let ditches     = [];
 let popups      = []; // floating score texts
 let clouds      = [
   { x: 90,  y: 55,  r: 55 },
@@ -116,40 +126,60 @@ let clouds      = [
 // ── Input ─────────────────────────────────────────────────────────────────────
 function tryJump() {
   if (gs === 'playing' && player.onGround) {
-    player.vy = JUMP_VY;
+    player.vy       = -8;   // small initial impulse; boost adds up to JUMP_VY=-15
     player.onGround = false;
+    jumpHeld        = true;
+    jumpBoost       = 14;   // 14 frames × 0.5 px/frame = 7 extra → total vy = -15
   }
 }
 
+function releaseJump() { jumpHeld = false; }
+
+// ── Keyboard
 document.addEventListener('keydown', e => {
   if (e.code === 'Space' || e.code === 'ArrowUp') {
     e.preventDefault();
-    if      (gs === 'playing')              tryJump();
-    else if (gs === 'levelend')             advanceLevel();
+    if      (gs === 'playing')                  tryJump();
+    else if (gs === 'levelend')                 advanceLevel();
     else if (gs === 'gameover' || gs === 'win') gs = 'select';
   }
   if (e.code === 'Enter') {
-    if      (gs === 'levelend')             advanceLevel();
+    if      (gs === 'levelend')                 advanceLevel();
     else if (gs === 'gameover' || gs === 'win') gs = 'select';
   }
 });
-
-canvas.addEventListener('click', e => {
-  const r  = canvas.getBoundingClientRect();
-  handleClick((e.clientX - r.left) * W / r.width,
-              (e.clientY - r.top)  * H / r.height);
+document.addEventListener('keyup', e => {
+  if (e.code === 'Space' || e.code === 'ArrowUp') releaseJump();
 });
 
+// ── Mouse: mousedown starts jump (for variable height), click handles UI
+canvas.addEventListener('mousedown', e => {
+  if (gs === 'playing') tryJump();
+});
+canvas.addEventListener('mouseup', releaseJump);
+canvas.addEventListener('click', e => {
+  if (gs === 'playing') return; // handled by mousedown
+  const r  = canvas.getBoundingClientRect();
+  handleUIClick((e.clientX - r.left) * W / r.width,
+                (e.clientY - r.top)  * H / r.height);
+});
+
+// ── Touch: touchstart begins jump, touchend releases boost and handles UI taps
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  if (gs === 'playing') tryJump();
+}, { passive: false });
 canvas.addEventListener('touchend', e => {
   e.preventDefault();
+  releaseJump();
   const r  = canvas.getBoundingClientRect();
   const t  = e.changedTouches[0];
-  handleClick((t.clientX - r.left) * W / r.width,
-              (t.clientY - r.top)  * H / r.height);
+  const mx = (t.clientX - r.left) * W / r.width;
+  const my = (t.clientY - r.top)  * H / r.height;
+  if (gs !== 'playing') handleUIClick(mx, my);
 }, { passive: false });
 
-function handleClick(mx, my) {
-  if (gs === 'playing')                      { tryJump(); return; }
+function handleUIClick(mx, my) {
   if (gs === 'levelend')                     { advanceLevel(); return; }
   if (gs === 'gameover' || gs === 'win')     { gs = 'select'; return; }
   if (gs === 'select') {
@@ -161,9 +191,7 @@ function handleClick(mx, my) {
       }
     }
     const sb = getStartBtn();
-    if (mx >= sb.x && mx <= sb.x + sb.w && my >= sb.y && my <= sb.y + sb.h) {
-      startGame();
-    }
+    if (mx >= sb.x && mx <= sb.x + sb.w && my >= sb.y && my <= sb.y + sb.h) startGame();
   }
 }
 
@@ -190,13 +218,16 @@ function startGame() {
 
 function initLevel() {
   frame       = 0;
-  spawnCD     = 90;
+  spawnCD     = 160;
   gScroll     = 0;
   hillOff     = 0;
   invFrames   = 0;
   flashFrames = 0;
   greenFrames = 0;
+  jumpHeld    = false;
+  jumpBoost   = 0;
   obstacles   = [];
+  ditches     = [];
   popups      = [];
   player = { x: PLAYER_X, y: GROUND_Y, vy: 0, onGround: true, runT: 0 };
   for (const c of clouds) c.x = [90, 330, 570, 730][clouds.indexOf(c)];
@@ -218,13 +249,51 @@ function update() {
   hillOff += cfg.speed * 0.3; // continuous — no modulo, so no jump-back flicker
 
   // Player physics
+  const prevY = player.y;          // feet position before this frame
   player.vy += GRAVITY;
   player.y  += player.vy;
-  if (player.y >= GROUND_Y) {
-    player.y      = GROUND_Y;
-    player.vy     = 0;
+  player.onGround = false;          // reset every frame, set below if touching surface
+
+  // Is the player's center over a ditch? (8px grace at each edge)
+  const overDitch = ditches.some(d => player.x > d.x + 8 && player.x < d.x + d.w - 8);
+
+  // Ground landing — only when not over a ditch
+  if (!overDitch && player.y >= GROUND_Y) {
+    player.y    = GROUND_Y;
+    player.vy   = 0;
     player.onGround = true;
   }
+
+  // Fell into ditch (past bottom of screen)
+  if (player.y > H + 60) {
+    fellIntoDitch();
+    return;
+  }
+
+  // Box-top landing: player can stand on boxes
+  if (!player.onGround && player.vy >= 0) {
+    for (const o of obstacles) {
+      if (o.type !== 'box') continue;
+      const pL = player.x - PLAYER_SIZE / 2 + 8;
+      const pR = player.x + PLAYER_SIZE / 2 - 8;
+      // Horizontal overlap AND feet just crossed box top this frame
+      if (pR > o.x && pL < o.x + o.w && player.y >= o.y && prevY <= o.y + 6) {
+        player.y    = o.y;
+        player.vy   = 0;
+        player.onGround = true;
+        break;
+      }
+    }
+  }
+
+  // Variable jump boost: extra upward force while key held
+  if (jumpHeld && jumpBoost > 0 && player.vy < 0) {
+    player.vy -= 0.5;
+    jumpBoost--;
+  } else if (player.vy >= 0) {
+    jumpHeld = false; // stop boosting once player starts falling
+  }
+
   if (player.onGround) player.runT += 0.038;
 
   // Clouds
@@ -242,36 +311,92 @@ function update() {
   for (const p of popups) { p.y -= 1.5; p.life--; }
   popups = popups.filter(p => p.life > 0);
 
-  // Spawn obstacles
-  spawnCD--;
-  if (spawnCD <= 0) {
-    const isLion = Math.random() < cfg.lionRatio;
-    const h = isLion ? 62 : 46;
-    const w = isLion ? 58 : 44;
-    obstacles.push({ x: W + 20, y: GROUND_Y - h, w, h, type: isLion ? 'lion' : 'box' });
-    spawnCD = cfg.spawnLo + Math.random() * (cfg.spawnHi - cfg.spawnLo);
-  }
-
-  // Move & cull obstacles
+  // Move & cull
   for (const o of obstacles) o.x -= cfg.speed;
-  obstacles = obstacles.filter(o => o.x > -130);
+  obstacles = obstacles.filter(o => o.x > -200);
+  for (const d of ditches) d.x -= cfg.speed;
+  ditches = ditches.filter(d => d.x + d.w > -10);
+
+  // Unified spawn stream — boxes/lions/ditches share one timer so they never overlap
+  spawnCD--;
+  if (spawnCD <= 0) spawnNext(cfg);
 
   // Collision
   if (invFrames === 0) {
     for (const o of obstacles) {
-      if (overlaps(player, o)) {
-        // Stomp: player falling onto top of lion
-        if (o.type === 'lion' && !player.onGround && player.vy > 0) {
-          stomp(o);
-        } else {
-          hit(o);
-        }
-        break;
+      if (!overlaps(player, o)) continue;
+      if (o.type === 'box') {
+        // Only a side-hit damages: player must not be jumping UP (vy<0)
+        // and feet must be below the box top (not landing from above)
+        if (player.vy >= 0 && player.y > o.y + 5) hit(o);
+      } else {
+        // Lion: stomp from above or take damage
+        if (!player.onGround && player.vy > 0) stomp(o);
+        else hit(o);
       }
+      break;
     }
   }
 
   if (frame >= LEVEL_FRAMES) gs = 'levelend';
+}
+
+// ── Spawn helpers ─────────────────────────────────────────────────────────────
+const BOX_W = 44, BOX_H = 46;
+
+function spawnNext(cfg) {
+  const roll = Math.random();
+  const ditchProb = 0.22;
+  const lionProb  = cfg.lionRatio * (1 - ditchProb);
+  let spawnedWidth;
+
+  if (roll < ditchProb) {
+    // Ditch
+    const w = cfg.ditchWMin + Math.random() * (cfg.ditchWMax - cfg.ditchWMin);
+    ditches.push({ x: W + 20, w });
+    spawnedWidth = w;
+  } else if (roll < ditchProb + lionProb) {
+    // Lion
+    obstacles.push({ x: W + 20, y: GROUND_Y - 62, w: 58, h: 62, type: 'lion' });
+    spawnedWidth = 58;
+  } else {
+    // Box cluster (1–4, always max 4)
+    const n = clusterSize();
+    spawnCluster(n);
+    spawnedWidth = n * BOX_W;
+  }
+
+  // Cooldown = time for element to scroll past + random gap (in px, converted to frames)
+  const gapPx = cfg.gapLo + Math.random() * (cfg.gapHi - cfg.gapLo);
+  spawnCD = Math.round((spawnedWidth + gapPx) / cfg.speed);
+}
+
+function clusterSize() {
+  // Weighted: 1=40%, 2=30%, 3=20%, 4=10%
+  const r = Math.random();
+  if (r < 0.40) return 1;
+  if (r < 0.70) return 2;
+  if (r < 0.90) return 3;
+  return 4;
+}
+
+function spawnCluster(n) {
+  const x0 = W + 20;
+  // Bottom row
+  for (let i = 0; i < n; i++) {
+    obstacles.push({ x: x0 + i * BOX_W, y: GROUND_Y - BOX_H, w: BOX_W, h: BOX_H, type: 'box' });
+  }
+  // Top row for n ≥ 3: (n-2) boxes centered over the bottom row
+  if (n >= 3) {
+    const topCount = n - 2;
+    for (let i = 0; i < topCount; i++) {
+      obstacles.push({
+        x: x0 + BOX_W + i * BOX_W,   // offset by 1 box to center
+        y: GROUND_Y - BOX_H * 2,
+        w: BOX_W, h: BOX_H, type: 'box',
+      });
+    }
+  }
 }
 
 function overlaps(p, o) {
@@ -306,6 +431,18 @@ function hit(o) {
   invFrames   = 110;
   flashFrames = 18;
   if (lives <= 0) gs = 'gameover';
+}
+
+function fellIntoDitch() {
+  lives--;
+  flashFrames = 22;
+  if (lives <= 0) {
+    gs = 'gameover';
+  } else {
+    // Restart level, keep score and lives
+    initLevel();
+    gs = 'playing';
+  }
 }
 
 // ── Drawing ───────────────────────────────────────────────────────────────────
@@ -382,13 +519,50 @@ function drawBackground() {
     }
   }
 
-  // Ground
+  // Ground — drawn in segments, with gaps for ditches
   ctx.fillStyle = cfg.ground;
-  ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
+  let gx = 0;
+  // Sort ditches left→right so segments are correct
+  const sortedDitches = [...ditches].sort((a, b) => a.x - b.x);
+  for (const d of sortedDitches) {
+    const dx = Math.max(0, d.x);
+    if (dx > gx) ctx.fillRect(gx, GROUND_Y, dx - gx, H - GROUND_Y);
+    gx = Math.min(W, d.x + d.w);
+  }
+  if (gx < W) ctx.fillRect(gx, GROUND_Y, W - gx, H - GROUND_Y);
 
-  // Ground edge line
+  // Ditch: dark abyss + glowing floor + edge walls
+  for (const d of sortedDitches) {
+    const dx = Math.max(0, d.x);
+    const dw = Math.min(W, d.x + d.w) - dx;
+    if (dw <= 0) continue;
+
+    // Abyss background
+    ctx.fillStyle = '#060008';
+    ctx.fillRect(dx, GROUND_Y, dw, H - GROUND_Y);
+
+    // Depth glow at bottom (lava-like on high levels, cold blue on low)
+    const glowColor = level >= 4 ? 'rgba(200,40,0,0.55)' : 'rgba(60,0,120,0.45)';
+    ctx.fillStyle = glowColor;
+    ctx.fillRect(dx, H - 28, dw, 28);
+
+    // Left wall
+    ctx.fillStyle = '#333';
+    ctx.fillRect(dx, GROUND_Y, 4, H - GROUND_Y);
+    // Right wall
+    ctx.fillStyle = '#222';
+    ctx.fillRect(Math.min(W, d.x + d.w) - 4, GROUND_Y, 4, H - GROUND_Y);
+  }
+
+  // Ground top edge line
   ctx.fillStyle = 'rgba(0,0,0,0.18)';
-  ctx.fillRect(0, GROUND_Y, W, 4);
+  gx = 0;
+  for (const d of sortedDitches) {
+    const dx = Math.max(0, d.x);
+    if (dx > gx) ctx.fillRect(gx, GROUND_Y, dx - gx, 4);
+    gx = Math.min(W, d.x + d.w);
+  }
+  if (gx < W) ctx.fillRect(gx, GROUND_Y, W - gx, 4);
 }
 
 function drawCloud(x, y, r, dark) {
