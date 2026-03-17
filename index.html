@@ -123,6 +123,49 @@ let clouds      = [
   { x: 730, y: 38,  r: 34 },
 ];
 
+// ── Sound ──────────────────────────────────────────────────────────────────────
+let _ac = null;
+function getAC() {
+  if (!_ac) _ac = new (window.AudioContext || window.webkitAudioContext)();
+  return _ac;
+}
+
+function playJump() {
+  try {
+    const ac = getAC();
+    const osc = ac.createOscillator();
+    const gain = ac.createGain();
+    osc.connect(gain); gain.connect(ac.destination);
+    osc.type = 'sine';
+    const t = ac.currentTime;
+    osc.frequency.setValueAtTime(220, t);
+    osc.frequency.exponentialRampToValueAtTime(520, t + 0.18);
+    gain.gain.setValueAtTime(0.25, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.22);
+    osc.start(t); osc.stop(t + 0.22);
+  } catch(e) {}
+}
+
+function playStep() {
+  try {
+    const ac = getAC();
+    const bufLen = Math.floor(ac.sampleRate * 0.04);
+    const buf = ac.createBuffer(1, bufLen, ac.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < bufLen; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / bufLen);
+    const src = ac.createBufferSource();
+    src.buffer = buf;
+    const gain = ac.createGain();
+    const filter = ac.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.value = 300;
+    filter.Q.value = 0.8;
+    src.connect(filter); filter.connect(gain); gain.connect(ac.destination);
+    gain.gain.setValueAtTime(0.18, ac.currentTime);
+    src.start(ac.currentTime);
+  } catch(e) {}
+}
+
 // ── Input ─────────────────────────────────────────────────────────────────────
 function tryJump() {
   if (gs === 'playing' && player.onGround) {
@@ -130,6 +173,7 @@ function tryJump() {
     player.onGround = false;
     jumpHeld        = true;
     jumpBoost       = 14;   // 14 frames × 0.5 px/frame = 7 extra → total vy = -15
+    playJump();
   }
 }
 
@@ -294,7 +338,12 @@ function update() {
     jumpHeld = false; // stop boosting once player starts falling
   }
 
-  if (player.onGround) player.runT += 0.038;
+  if (player.onGround) {
+    const prevRunT = player.runT;
+    player.runT += 0.038;
+    // Fire step sound once per stride (when runT crosses an integer)
+    if (Math.floor(player.runT) > Math.floor(prevRunT)) playStep();
+  }
 
   // Clouds
   for (const c of clouds) {
@@ -360,7 +409,7 @@ function spawnNext(cfg) {
     obstacles.push({ x: W + 20, y: GROUND_Y - 62, w: 58, h: 62, type: 'lion' });
     spawnedWidth = 58;
   } else {
-    // Box cluster (1–4, always max 4)
+    // Box cluster (1–8)
     const n = clusterSize();
     spawnCluster(n);
     spawnedWidth = n * BOX_W;
@@ -372,31 +421,36 @@ function spawnNext(cfg) {
 }
 
 function clusterSize() {
-  // Weighted: 1=40%, 2=30%, 3=20%, 4=10%
+  // Weighted: 1=30%, 2=25%, 3=18%, 4=12%, 5=7%, 6=4%, 7=3%, 8=1%
   const r = Math.random();
-  if (r < 0.40) return 1;
-  if (r < 0.70) return 2;
-  if (r < 0.90) return 3;
-  return 4;
+  if (r < 0.30) return 1;
+  if (r < 0.55) return 2;
+  if (r < 0.73) return 3;
+  if (r < 0.85) return 4;
+  if (r < 0.92) return 5;
+  if (r < 0.96) return 6;
+  if (r < 0.99) return 7;
+  return 8;
+}
+
+// Returns array of layer widths bottom→top. Each layer ≥ 2 and 2 narrower than the one below.
+// Future: add a maxLayers param to cap at e.g. 3 rows.
+function buildLayers(baseWidth) {
+  const layers = [baseWidth];
+  let w = baseWidth - 2;
+  while (w >= 2) { layers.push(w); w -= 2; }
+  return layers;
 }
 
 function spawnCluster(n) {
   const x0 = W + 20;
-  // Bottom row
-  for (let i = 0; i < n; i++) {
-    obstacles.push({ x: x0 + i * BOX_W, y: GROUND_Y - BOX_H, w: BOX_W, h: BOX_H, type: 'box' });
-  }
-  // Top row for n ≥ 3: (n-2) boxes centered over the bottom row
-  if (n >= 3) {
-    const topCount = n - 2;
-    for (let i = 0; i < topCount; i++) {
-      obstacles.push({
-        x: x0 + BOX_W + i * BOX_W,   // offset by 1 box to center
-        y: GROUND_Y - BOX_H * 2,
-        w: BOX_W, h: BOX_H, type: 'box',
-      });
+  buildLayers(n).forEach((layerW, row) => {
+    const xOff = row * BOX_W; // center each layer: offset by 1 box per row
+    const y = GROUND_Y - BOX_H * (row + 1);
+    for (let i = 0; i < layerW; i++) {
+      obstacles.push({ x: x0 + xOff + i * BOX_W, y, w: BOX_W, h: BOX_H, type: 'box' });
     }
-  }
+  });
 }
 
 function overlaps(p, o) {
