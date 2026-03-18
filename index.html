@@ -42,6 +42,7 @@ const JUMP_VY     = -15;
 const LEVEL_FRAMES = 2400;
 // Platform floats high enough to walk under (head clearance ~60px) and low enough to jump onto
 const PLATFORM_Y  = GROUND_Y - 160; // feet=370, head=318, platform bottom=256 → 62px gap
+const PLATFORM_Y2 = PLATFORM_Y - 100; // second tier: reachable from P1, not from ground
 
 // ── Pre-render static assets ──────────────────────────────────────────────────
 // Stars background (drawn once, reused every frame on select screen)
@@ -121,6 +122,9 @@ let ditches     = [];
 let diamonds    = [];
 let platformCount = 0;     // increments each spawn; every 2nd gets diamonds
 let boxDiamondBudget = 0;  // diamonds left to place on box clusters this level
+let lastSpawnType    = ''; // prevents two enemies in a row
+let hearts           = [];
+let heartSpawned     = false; // max 1 heart per 2-level pair
 let popups      = []; // floating score texts
 let clouds      = [
   { x: 90,  y: 55,  r: 55 },
@@ -213,6 +217,25 @@ function playPling() {
     gain.gain.setValueAtTime(0.18, t);
     gain.gain.exponentialRampToValueAtTime(0.001, t + 0.28);
     osc.start(t); osc.stop(t + 0.28);
+  } catch(e) {}
+}
+
+function playHeart() {
+  try {
+    const ac = getAC();
+    const t  = ac.currentTime;
+    [523, 659, 784].forEach((freq, i) => {
+      const osc  = ac.createOscillator();
+      const gain = ac.createGain();
+      osc.connect(gain); gain.connect(ac.destination);
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      const st = t + i * 0.13;
+      gain.gain.setValueAtTime(0.001, st);
+      gain.gain.linearRampToValueAtTime(0.22, st + 0.03);
+      gain.gain.exponentialRampToValueAtTime(0.001, st + 0.25);
+      osc.start(st); osc.stop(st + 0.28);
+    });
   } catch(e) {}
 }
 
@@ -324,8 +347,11 @@ function initLevel() {
   obstacles         = [];
   ditches           = [];
   diamonds          = [];
+  hearts            = [];
   platformCount     = 0;
+  if (level % 2 === 1) heartSpawned = false; // new 2-level pair: allow 1 heart again
   boxDiamondBudget  = 10 + Math.floor(Math.random() * 11); // 10–20 per level
+  lastSpawnType     = '';
   popups            = [];
   player = { x: PLAYER_X, y: GROUND_Y, vy: 0, onGround: true, runT: 0 };
   for (const c of clouds) c.x = [90, 330, 570, 730][clouds.indexOf(c)];
@@ -368,7 +394,7 @@ function update() {
     // Reward ditch crossing exactly on landing
     if (pendingDitchBonus) {
       pendingDitchBonus = false;
-      score += 20;
+      addScore(20);
       popups.push({ x: player.x, y: player.y - 60, text: '+20', life: 55, color: '#a0e060' });
     }
   }
@@ -430,19 +456,53 @@ function update() {
   obstacles = obstacles.filter(o => o.x > -200);
   for (const d of ditches) d.x -= cfg.speed;
   ditches = ditches.filter(d => d.x + d.w > -10);
+  for (const h of hearts) h.x -= cfg.speed;
+  hearts = hearts.filter(h => {
+    if (h.x < -20) return false;
+    if (Math.abs(player.x - h.x) < PLAYER_SIZE / 2 + 10 &&
+        Math.abs((player.y - PLAYER_SIZE / 2) - h.y) < PLAYER_SIZE / 2 + 10) {
+      lives = Math.min(lives + 1, 9);
+      greenFrames = 14;
+      playHeart();
+      popups.push({ x: h.x, y: h.y - 10, text: '❤️ +1', life: 80, color: '#ff4488' });
+      return false;
+    }
+    return true;
+  });
   for (const d of diamonds) d.x -= cfg.speed;
   diamonds = diamonds.filter(d => {
     if (d.x < -20) return false;
     // Collect if player overlaps diamond
     if (Math.abs(player.x - d.x) < PLAYER_SIZE / 2 + 6 &&
         Math.abs((player.y - PLAYER_SIZE / 2) - d.y) < PLAYER_SIZE / 2 + 6) {
-      score += 10;
+      addScore(d.pts);
       playPling();
-      popups.push({ x: d.x, y: d.y - 10, text: '+10', life: 45, color: '#60d8ff' });
+      popups.push({ x: d.x, y: d.y - 10, text: `+${d.pts}`, life: 45, color: d.color });
       return false;
     }
     return true;
   });
+
+  // Update vulture vertical oscillation
+  for (const o of obstacles) {
+    if (o.type !== 'vulture') continue;
+    switch (o.state) {
+      case 'bottom':
+        if (--o.stateTimer <= 0) o.state = 'rising';
+        break;
+      case 'rising':
+        o.y -= o.flySpeed;
+        if (o.y <= o.yHigh) { o.y = o.yHigh; o.state = 'top'; o.stateTimer = o.waitTop; }
+        break;
+      case 'top':
+        if (--o.stateTimer <= 0) o.state = 'falling';
+        break;
+      case 'falling':
+        o.y += o.flySpeed;
+        if (o.y >= o.yLow) { o.y = o.yLow; o.state = 'bottom'; o.stateTimer = o.waitBot; }
+        break;
+    }
+  }
 
   // Unified spawn stream — boxes/lions/ditches share one timer so they never overlap
   spawnCD--;
@@ -461,12 +521,12 @@ function update() {
       if (o.type === 'flag' || o.type === 'platform') continue;
       if (!overlaps(player, o)) continue;
       if (o.type === 'box') {
-        // Only a side-hit damages: player must not be jumping UP (vy<0)
-        // and feet must be below the box top (not landing from above)
         if (player.vy >= 0 && player.y > o.y + 5) hit(o);
-      } else {
-        // Lion: stomp from above or take damage
-        if (!player.onGround && player.vy > 0) stomp(o);
+      } else if (o.type === 'lion') {
+        if (!player.onGround && player.vy > 0) stomp(o, 100);
+        else hit(o);
+      } else if (o.type === 'vulture') {
+        if (!player.onGround && player.vy > 0) stomp(o, 150);
         else hit(o);
       }
       break;
@@ -480,35 +540,66 @@ function update() {
 const BOX_W = 44, BOX_H = 46;
 
 function spawnNext(cfg) {
-  const roll = Math.random();
-  const ditchProb = 0.22;
-  const lionProb  = cfg.lionRatio * (1 - ditchProb);
+  const roll        = Math.random();
+  const ditchProb   = 0.22;
+  const enemyTotal  = cfg.lionRatio * (1 - ditchProb);
+  const lionProb    = enemyTotal * 0.6;
+  const vultureProb = enemyTotal * 0.4;
+  const noEnemy     = lastSpawnType === 'lion' || lastSpawnType === 'vulture';
   let spawnedWidth;
-  let lionSpawned = false;
+  let enemySpawned = false;
 
   if (roll < ditchProb) {
     // Ditch
     const w = cfg.ditchWMin + Math.random() * (cfg.ditchWMax - cfg.ditchWMin);
     ditches.push({ x: W + 20, w });
     spawnedWidth = w;
-  } else if (roll < ditchProb + lionProb) {
+    lastSpawnType = 'ditch';
+
+  } else if (roll < ditchProb + lionProb && !noEnemy) {
     // Lion
     obstacles.push({ x: W + 20, y: GROUND_Y - 62, w: 58, h: 62, type: 'lion' });
     spawnedWidth = 58;
-    lionSpawned = true;
+    enemySpawned = true;
+    lastSpawnType = 'lion';
+
+  } else if (roll < ditchProb + lionProb + vultureProb && !noEnemy) {
+    // Vulture — oscillates vertically; starts randomly at bottom or top
+    const vw = 68, vh = 44;
+    const vYLow  = GROUND_Y - vh;
+    const vYHigh = GROUND_Y - 195;
+    const startTop     = Math.random() < 0.5;
+    const waitBot = 60 + Math.floor(Math.random() * 60);
+    const waitTop = 50 + Math.floor(Math.random() * 50);
+    obstacles.push({
+      x: W + 20,
+      y: startTop ? vYHigh : vYLow,
+      yLow: vYLow, yHigh: vYHigh,
+      w: vw, h: vh, type: 'vulture',
+      state: startTop ? 'top' : 'bottom',
+      stateTimer: startTop ? waitTop : waitBot,
+      waitBot, waitTop, flySpeed: 2.5,
+    });
+    spawnedWidth = vw;
+    enemySpawned = true;
+    lastSpawnType = 'vulture';
+
   } else if (Math.random() < 0.35) {
-    // Floating platform with stepping-stone boxes before it
-    const n = Math.max(2, Math.floor(Math.random() * 5) + 2); // 2–6 platform cells
+    // Floating platform with stepping-stone boxes
+    const n = Math.max(2, Math.floor(Math.random() * 5) + 2);
     spawnedWidth = spawnPlatform(n);
+    lastSpawnType = 'platform';
+
   } else {
     // Box cluster (1–8)
     const n = clusterSize();
     spawnCluster(n);
     spawnedWidth = n * BOX_W;
+    lastSpawnType = 'box';
   }
 
-  // Lions need a bigger gap so the stomp-bounce doesn't carry the player into the next one
-  const gapMin = lionSpawned ? Math.max(cfg.gapLo, 340) : cfg.gapLo;
+  // Enemies need a large gap so stomp-bounce can't chain into the next obstacle
+  const gapMin = enemySpawned ? Math.max(cfg.gapLo, 340) : cfg.gapLo;
   const gapPx  = gapMin + Math.random() * (cfg.gapHi - gapMin);
   spawnCD = Math.round((spawnedWidth + gapPx) / cfg.speed);
 }
@@ -538,24 +629,28 @@ function buildLayers(baseWidth) {
 
 function spawnCluster(n) {
   const x0 = W + 20;
+  // Track the topmost (lowest y value) box per x-column so diamonds land on the peak
+  const colTop = new Map(); // box left-x → minimum y seen
+
   buildLayers(n).forEach((layerW, row) => {
-    const xOff = row * 2 * BOX_W; // 2-box left offset per row → 2-wide approach steps
+    const xOff = row * 2 * BOX_W;
     const y = GROUND_Y - BOX_H * (row + 1);
     for (let i = 0; i < layerW; i++) {
-      obstacles.push({ x: x0 + xOff + i * BOX_W, y, w: BOX_W, h: BOX_H, type: 'box' });
+      const bx = x0 + xOff + i * BOX_W;
+      obstacles.push({ x: bx, y, w: BOX_W, h: BOX_H, type: 'box' });
+      if (!colTop.has(bx) || y < colTop.get(bx)) colTop.set(bx, y);
     }
   });
 
-  // Randomly place 1–2 diamonds on the bottom row, consuming the level budget
+  // Place 1–2 diamonds on randomly chosen columns, always at the column's topmost box.
+  // 30% of diamonds float 40–100 px above the box (still reachable by jumping).
   if (boxDiamondBudget > 0 && Math.random() < 0.55) {
-    const count = Math.min(boxDiamondBudget, n >= 4 ? 2 : 1);
-    const picks = [];
-    while (picks.length < count) {
-      const p = Math.floor(Math.random() * n);
-      if (!picks.includes(p)) picks.push(p);
-    }
-    for (const p of picks) {
-      diamonds.push({ x: x0 + p * BOX_W + BOX_W / 2, y: GROUND_Y - BOX_H - 14 });
+    const cols    = [...colTop.entries()];          // [[bx, topY], …]
+    const count   = Math.min(boxDiamondBudget, n >= 4 ? 2 : 1);
+    const shuffled = cols.sort(() => Math.random() - 0.5).slice(0, count);
+    for (const [bx, topY] of shuffled) {
+      const floatExtra = Math.random() < 0.3 ? 40 + Math.random() * 60 : 0;
+      diamonds.push({ x: bx + BOX_W / 2, y: topY - 14 - floatExtra, color: '#38c8ff', pts: 10 });
       boxDiamondBudget--;
     }
   }
@@ -586,11 +681,35 @@ function spawnPlatform(n) {
   platformCount++;
   if (platformCount % 2 === 0) {
     for (let i = 0; i < n; i++) {
-      diamonds.push({ x: platX + i * BOX_W + BOX_W / 2, y: PLATFORM_Y - 16 });
+      diamonds.push({ x: platX + i * BOX_W + BOX_W / 2, y: PLATFORM_Y - 16, color: '#38c8ff', pts: 10 });
     }
   }
 
-  return stepW * BOX_W + gap + n * BOX_W;
+  // Rarely place a heart on this platform (max 1 per 2-level pair)
+  if (!heartSpawned && Math.random() < 0.25) {
+    const hx = platX + Math.floor(Math.random() * n) * BOX_W + BOX_W / 2;
+    hearts.push({ x: hx, y: PLATFORM_Y - 18 });
+    heartSpawned = true;
+  }
+
+  // 45% chance: add a second, higher platform reachable from this one
+  let tier2Width = 0;
+  if (Math.random() < 0.45) {
+    const n2   = 1 + Math.floor(Math.random() * 3);           // 1–3 wide
+    const gap2 = BOX_W + Math.floor(Math.random() * 2) * BOX_W; // 1–3 box gap
+    const plat2X = platX + n * BOX_W + gap2;
+    for (let i = 0; i < n2; i++) {
+      obstacles.push({ x: plat2X + i * BOX_W, y: PLATFORM_Y2, w: BOX_W, h: BOX_H, type: 'platform' });
+    }
+    // 50% chance of exactly 1 red diamond on a random cell of the tier-2 platform
+    if (Math.random() < 0.5) {
+      const ri = Math.floor(Math.random() * n2);
+      diamonds.push({ x: plat2X + ri * BOX_W + BOX_W / 2, y: PLATFORM_Y2 - 16, color: '#ff2244', pts: 30 });
+    }
+    tier2Width = gap2 + n2 * BOX_W;
+  }
+
+  return stepW * BOX_W + gap + n * BOX_W + tier2Width;
 }
 
 function overlaps(p, o) {
@@ -601,23 +720,26 @@ function overlaps(p, o) {
          (p.y - m)                   > (o.y + m);
 }
 
-function stomp(o) {
-  const cx   = o.x + o.w / 2;
-  const cy   = o.y;
+// Central score function — always checks 1000-point milestones
+function addScore(pts) {
   const prev = score;
-  score += 100;
-  o.x = -600;
-  playPunch();
-  player.vy = JUMP_VY * 0.6; // bounce off lion
-
-  popups.push({ x: cx, y: cy, text: '+100', life: 55, color: '#FFD700' });
-
-  // Every 1000 points → +1 life
-  if (Math.floor(score / 1000) > Math.floor(prev / 1000)) {
+  score += pts;
+  const milestones = Math.floor(score / 1000) - Math.floor(prev / 1000);
+  for (let i = 0; i < milestones; i++) {
     lives = Math.min(lives + 1, 9);
-    greenFrames = 35;
+    greenFrames = 40;
     popups.push({ x: W / 2, y: H / 2 - 20, text: '❤️ +1 Leben!', life: 90, color: '#ff6b6b' });
   }
+}
+
+function stomp(o, pts = 100) {
+  const cx = o.x + o.w / 2;
+  const cy = o.y;
+  o.x = -600;
+  playPunch();
+  player.vy = JUMP_VY * 0.6;
+  addScore(pts);
+  popups.push({ x: cx, y: cy, text: `+${pts}`, life: 55, color: '#FFD700' });
 }
 
 function hit(o) {
@@ -649,6 +771,7 @@ function draw() {
   drawBackground();
   drawObstacles();
   drawDiamonds();
+  drawHearts();
   drawPlayer();
   drawPopups();
   drawHUD();
@@ -770,14 +893,42 @@ function drawCloud(x, y, r, dark) {
   ctx.fill();
 }
 
+// ── Hearts ────────────────────────────────────────────────────────────────────
+function drawHearts() {
+  for (const h of hearts) {
+    const r = 10;
+    ctx.save();
+    ctx.translate(h.x, h.y);
+    // Glow
+    ctx.fillStyle = 'rgba(255, 80, 120, 0.25)';
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 1.6, 0, Math.PI * 2);
+    ctx.fill();
+    // Heart shape: two circles + triangle
+    ctx.fillStyle = '#ff3366';
+    ctx.beginPath();
+    ctx.arc(-r * 0.5, -r * 0.15, r * 0.65, Math.PI, 0);
+    ctx.arc( r * 0.5, -r * 0.15, r * 0.65, Math.PI, 0);
+    ctx.lineTo(0, r * 1.15);
+    ctx.closePath();
+    ctx.fill();
+    // Shine
+    ctx.fillStyle = 'rgba(255,255,255,0.45)';
+    ctx.beginPath();
+    ctx.ellipse(-r * 0.3, -r * 0.3, r * 0.3, r * 0.18, -0.4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
 // ── Diamonds ──────────────────────────────────────────────────────────────────
 function drawDiamonds() {
   for (const d of diamonds) {
     const s = 9; // half-size of diamond
     ctx.save();
     ctx.translate(d.x, d.y);
-    // Main gem body
-    ctx.fillStyle = '#38c8ff';
+    // Main gem body (color from data: blue for normal, red for tier-2)
+    ctx.fillStyle = d.color;
     ctx.beginPath();
     ctx.moveTo(0, -s);
     ctx.lineTo(s, 0);
@@ -795,7 +946,7 @@ function drawDiamonds() {
     ctx.closePath();
     ctx.fill();
     // Outline
-    ctx.strokeStyle = 'rgba(0,160,220,0.8)';
+    ctx.strokeStyle = d.pts > 10 ? 'rgba(200,0,60,0.8)' : 'rgba(0,160,220,0.8)';
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(0, -s);
@@ -806,6 +957,81 @@ function drawDiamonds() {
     ctx.stroke();
     ctx.restore();
   }
+}
+
+// ── Vulture drawing ───────────────────────────────────────────────────────────
+function drawVulture(o) {
+  const cx = o.x + o.w / 2;
+  const cy = o.y + o.h / 2;
+  // Wing angle depends on movement state
+  const flap = o.state === 'rising' ? -12 : o.state === 'falling' ? 8 : -3;
+
+  ctx.save();
+  ctx.translate(cx, cy);
+
+  // Wings (left & right, same shape mirrored)
+  ctx.fillStyle = '#1a1230';
+  for (const side of [-1, 1]) {
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.quadraticCurveTo(side * 20, -14 + flap, side * 36, -2 + flap * 0.4);
+    ctx.quadraticCurveTo(side * 22, 10, side * 4, 8);
+    ctx.closePath();
+    ctx.fill();
+    // Wing feather tips
+    ctx.fillStyle = '#2a2050';
+    ctx.beginPath();
+    ctx.moveTo(side * 28, -4 + flap * 0.4);
+    ctx.quadraticCurveTo(side * 36, -8 + flap * 0.5, side * 40, 0 + flap * 0.3);
+    ctx.quadraticCurveTo(side * 34, 4, side * 26, 4);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = '#1a1230'; // reset for next side
+  }
+
+  // Body
+  ctx.fillStyle = '#2c2040';
+  ctx.beginPath();
+  ctx.ellipse(0, 4, 10, 9, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Neck + bald head (faces left — toward player)
+  ctx.fillStyle = '#d4a070';
+  ctx.beginPath();
+  ctx.arc(-10, -4, 8, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Hooked beak
+  ctx.fillStyle = '#b89000';
+  ctx.beginPath();
+  ctx.moveTo(-17, -5);
+  ctx.lineTo(-27, -2);
+  ctx.lineTo(-25, 3);
+  ctx.lineTo(-17, 0);
+  ctx.closePath();
+  ctx.fill();
+
+  // Eye
+  ctx.fillStyle = '#ff3300';
+  ctx.beginPath();
+  ctx.arc(-12, -6, 2.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#000';
+  ctx.beginPath();
+  ctx.arc(-11.5, -6, 1, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+
+  // Warning badge
+  ctx.fillStyle = '#ff6600';
+  ctx.beginPath();
+  ctx.arc(cx, o.y - 12, 9, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = 'white';
+  ctx.font = 'bold 12px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText('!', cx, o.y - 7);
 }
 
 // ── Obstacles ─────────────────────────────────────────────────────────────────
@@ -832,6 +1058,8 @@ function drawObstacles() {
       ctx.fillStyle = '#E8A060';
       ctx.fillRect(o.x, o.y, o.w, 3);
       ctx.fillRect(o.x, o.y,   3, o.h);
+    } else if (o.type === 'vulture') {
+      drawVulture(o);
     } else if (o.type === 'platform') {
       // Semi-transparent blue floating platform block
       ctx.fillStyle = 'rgba(50, 130, 255, 0.38)';
