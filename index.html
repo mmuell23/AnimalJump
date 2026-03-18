@@ -123,6 +123,9 @@ let diamonds    = [];
 let platformCount = 0;     // increments each spawn; every 2nd gets diamonds
 let boxDiamondBudget = 0;  // diamonds left to place on box clusters this level
 let lastSpawnType    = ''; // prevents two enemies in a row
+let potions          = [];
+let potionSpawned    = false;
+let floatFrames      = 0;    // >0 = potion flight mode active
 let hearts           = [];
 let heartSpawned     = false; // max 1 heart per 2-level pair
 let popups      = []; // floating score texts
@@ -132,6 +135,7 @@ let clouds      = [
   { x: 570, y: 72,  r: 65 },
   { x: 730, y: 38,  r: 34 },
 ];
+const keys = {}; // live key state for float mode
 
 // ── Sound ──────────────────────────────────────────────────────────────────────
 let _ac = null;
@@ -239,6 +243,45 @@ function playHeart() {
   } catch(e) {}
 }
 
+function playPotion() {
+  try {
+    const ac = getAC();
+    const t  = ac.currentTime;
+    // Bubbling: three quick low blurps
+    [180, 220, 160].forEach((freq, i) => {
+      const osc = ac.createOscillator();
+      const gain = ac.createGain();
+      const filt = ac.createBiquadFilter();
+      filt.type = 'lowpass'; filt.frequency.value = 600;
+      osc.connect(filt); filt.connect(gain); gain.connect(ac.destination);
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(freq, t + i * 0.08);
+      osc.frequency.exponentialRampToValueAtTime(freq * 0.5, t + i * 0.08 + 0.1);
+      gain.gain.setValueAtTime(0.18, t + i * 0.08);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + i * 0.08 + 0.14);
+      osc.start(t + i * 0.08); osc.stop(t + i * 0.08 + 0.15);
+    });
+  } catch(e) {}
+}
+
+function playPuff() {
+  try {
+    const ac = getAC();
+    const bufLen = Math.floor(ac.sampleRate * 0.08);
+    const buf = ac.createBuffer(1, bufLen, ac.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < bufLen; i++) data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / bufLen, 1.5);
+    const src = ac.createBufferSource();
+    src.buffer = buf;
+    const gain = ac.createGain();
+    const filt = ac.createBiquadFilter();
+    filt.type = 'bandpass'; filt.frequency.value = 800; filt.Q.value = 0.5;
+    src.connect(filt); filt.connect(gain); gain.connect(ac.destination);
+    gain.gain.setValueAtTime(0.3, ac.currentTime);
+    src.start(ac.currentTime);
+  } catch(e) {}
+}
+
 // ── Input ─────────────────────────────────────────────────────────────────────
 function tryJump() {
   if (gs === 'playing' && player.onGround) {
@@ -254,9 +297,10 @@ function releaseJump() { jumpHeld = false; }
 
 // ── Keyboard
 document.addEventListener('keydown', e => {
+  keys[e.code] = true;
   if (e.code === 'Space' || e.code === 'ArrowUp') {
     e.preventDefault();
-    if      (gs === 'playing')                  tryJump();
+    if      (gs === 'playing' && floatFrames === 0) tryJump();
     else if (gs === 'levelend')                 advanceLevel();
     else if (gs === 'gameover' || gs === 'win') gs = 'select';
   }
@@ -266,6 +310,7 @@ document.addEventListener('keydown', e => {
   }
 });
 document.addEventListener('keyup', e => {
+  keys[e.code] = false;
   if (e.code === 'Space' || e.code === 'ArrowUp') releaseJump();
 });
 
@@ -352,6 +397,9 @@ function initLevel() {
   if (level % 2 === 1) heartSpawned = false; // new 2-level pair: allow 1 heart again
   boxDiamondBudget  = 10 + Math.floor(Math.random() * 11); // 10–20 per level
   lastSpawnType     = '';
+  potions           = [];
+  potionSpawned     = false;
+  floatFrames       = 0;
   popups            = [];
   player = { x: PLAYER_X, y: GROUND_Y, vy: 0, onGround: true, runT: 0 };
   for (const c of clouds) c.x = [90, 330, 570, 730][clouds.indexOf(c)];
@@ -374,9 +422,20 @@ function update() {
 
   // Player physics
   const prevY = player.y;          // feet position before this frame
-  player.vy += GRAVITY;
-  player.y  += player.vy;
-  player.onGround = false;          // reset every frame, set below if touching surface
+
+  if (floatFrames > 0) {
+    // ── Float mode: gravity off, ArrowUp/Down control altitude ──────────────
+    player.vy = keys['ArrowUp'] ? -2.5 : keys['ArrowDown'] ? 2.5 : 0;
+    player.y  = Math.max(PLAYER_SIZE, player.y + player.vy);
+    player.onGround = false;
+    floatFrames--;
+    if (floatFrames === 0) { playPuff(); }
+  } else {
+    // ── Normal physics ───────────────────────────────────────────────────────
+    player.vy += GRAVITY;
+    player.y  += player.vy;
+    player.onGround = false;          // reset every frame, set below if touching surface
+  }
 
   // Is the player over a ditch? Once below ground level, keep falling regardless
   // (ditch may scroll past before player falls far enough otherwise)
@@ -386,8 +445,8 @@ function update() {
   // While airborne over a ditch, mark that a bonus is pending
   if (aboveDitch && !player.onGround) pendingDitchBonus = true;
 
-  // Ground landing — only when not over a ditch
-  if (!overDitch && player.y >= GROUND_Y) {
+  // Ground landing — only in normal mode (float mode never snaps to ground)
+  if (floatFrames === 0 && !overDitch && player.y >= GROUND_Y) {
     player.y    = GROUND_Y;
     player.vy   = 0;
     player.onGround = true;
@@ -399,13 +458,14 @@ function update() {
     }
   }
 
-  // Fell into ditch (past bottom of screen)
-  if (player.y > H + 60) {
+  // Fell into ditch (past bottom of screen) — only possible in normal mode
+  if (floatFrames === 0 && player.y > H + 60) {
     fellIntoDitch();
     return;
   }
 
   // Box/platform top landing: player can stand on boxes and platforms (one-way)
+  // (still active in float mode so collisions remain consistent)
   if (!player.onGround && player.vy >= 0) {
     for (const o of obstacles) {
       if (o.type !== 'box' && o.type !== 'platform') continue;
@@ -469,6 +529,18 @@ function update() {
     }
     return true;
   });
+  for (const p of potions) p.x -= cfg.speed;
+  potions = potions.filter(p => {
+    if (p.x < -20) return false;
+    if (Math.abs(player.x - p.x) < PLAYER_SIZE / 2 + 10 &&
+        Math.abs((player.y - PLAYER_SIZE / 2) - p.y) < PLAYER_SIZE / 2 + 10) {
+      floatFrames = 450; // 7.5 seconds at 60 fps
+      playPotion();
+      popups.push({ x: p.x, y: p.y - 10, text: '✨ Schweben!', life: 90, color: '#80ff80' });
+      return false;
+    }
+    return true;
+  });
   for (const d of diamonds) d.x -= cfg.speed;
   diamonds = diamonds.filter(d => {
     if (d.x < -20) return false;
@@ -504,15 +576,19 @@ function update() {
     }
   }
 
-  // Unified spawn stream — boxes/lions/ditches share one timer so they never overlap
-  spawnCD--;
-  if (spawnCD <= 0) spawnNext(cfg);
-
-  // Spawn finish flag so it arrives at player position right as level ends
-  const flagArrivalFrame = LEVEL_FRAMES - 15;
+  // Unified spawn stream — stop well before the flag arrives for a clean finish
   const flagTravelFrames = Math.ceil((W + 20 - PLAYER_X) / cfg.speed);
-  if (frame === flagArrivalFrame - flagTravelFrames) {
+  const flagSpawnFrame   = LEVEL_FRAMES - 15 - flagTravelFrames;
+  const clearZoneFrames  = Math.ceil(350 / cfg.speed); // ~350 px runway before flag
+  spawnCD--;
+  if (spawnCD <= 0 && frame < flagSpawnFrame - clearZoneFrames) spawnNext(cfg);
+
+  // Spawn finish flag; also purge any obstacles/ditches still far to the right
+  if (frame === flagSpawnFrame) {
     obstacles.push({ x: W + 20, type: 'flag' });
+    // Remove anything spawned too recently that would crowd the flag
+    obstacles = obstacles.filter(o => o.type === 'flag' || o.x < W);
+    ditches   = ditches.filter(d => d.x + d.w < W);
   }
 
   // Collision
@@ -641,6 +717,13 @@ function spawnCluster(n) {
       if (!colTop.has(bx) || y < colTop.get(bx)) colTop.set(bx, y);
     }
   });
+
+  // Very rarely spawn a potion on top of a random bottom-row box (max 1 per level)
+  if (!potionSpawned && Math.random() < 0.2) {
+    const pi = Math.floor(Math.random() * n);
+    potions.push({ x: x0 + pi * BOX_W + BOX_W / 2, y: GROUND_Y - BOX_H - 22 });
+    potionSpawned = true;
+  }
 
   // Place 1–2 diamonds on randomly chosen columns, always at the column's topmost box.
   // 30% of diamonds float 40–100 px above the box (still reachable by jumping).
@@ -772,6 +855,7 @@ function draw() {
   drawObstacles();
   drawDiamonds();
   drawHearts();
+  drawPotions();
   drawPlayer();
   drawPopups();
   drawHUD();
@@ -891,6 +975,36 @@ function drawCloud(x, y, r, dark) {
   ctx.arc(x + r * 0.80, y + 5, r * 0.65, 0, Math.PI * 2);
   ctx.arc(x - r * 0.70, y + 8, r * 0.60, 0, Math.PI * 2);
   ctx.fill();
+}
+
+// ── Potions ───────────────────────────────────────────────────────────────────
+function drawPotions() {
+  for (const p of potions) {
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    // Flask body (round bottom)
+    ctx.fillStyle = 'rgba(60,220,80,0.85)';
+    ctx.beginPath();
+    ctx.arc(0, 4, 9, 0, Math.PI * 2);
+    ctx.fill();
+    // Neck
+    ctx.fillStyle = 'rgba(60,200,70,0.9)';
+    ctx.fillRect(-4, -8, 8, 12);
+    // Cork
+    ctx.fillStyle = '#c8a060';
+    ctx.fillRect(-3, -13, 6, 5);
+    // Shine
+    ctx.fillStyle = 'rgba(255,255,255,0.45)';
+    ctx.beginPath();
+    ctx.ellipse(-3, 0, 3, 5, -0.4, 0, Math.PI * 2);
+    ctx.fill();
+    // Bubble inside
+    ctx.fillStyle = 'rgba(180,255,180,0.6)';
+    ctx.beginPath();
+    ctx.arc(2, 5, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
 }
 
 // ── Hearts ────────────────────────────────────────────────────────────────────
@@ -1307,6 +1421,24 @@ function drawAnimalSprite(cx, groundY, idx, runT, onGround) {
 // ── Player ────────────────────────────────────────────────────────────────────
 function drawPlayer() {
   if (invFrames > 0 && Math.floor(invFrames / 7) % 2 === 1) return;
+  if (floatFrames > 0) {
+    // Green glow aura behind player
+    const pulse = 0.25 + 0.15 * Math.sin(frame * 0.2);
+    ctx.save();
+    ctx.globalAlpha = pulse;
+    ctx.fillStyle = '#40ff80';
+    ctx.beginPath();
+    ctx.ellipse(player.x, player.y - PLAYER_SIZE * 0.5, PLAYER_SIZE * 0.6, PLAYER_SIZE * 0.6, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    // Float timer bar above player
+    const barW = 36;
+    const ratio = floatFrames / 300;
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.fillRect(player.x - barW / 2, player.y - PLAYER_SIZE - 10, barW, 5);
+    ctx.fillStyle = `hsl(${120 * ratio},100%,50%)`;
+    ctx.fillRect(player.x - barW / 2, player.y - PLAYER_SIZE - 10, barW * ratio, 5);
+  }
   drawAnimalSprite(player.x, player.y, selAnimal, player.runT, player.onGround);
 }
 
