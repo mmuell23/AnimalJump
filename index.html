@@ -31,14 +31,16 @@
 
 const canvas = document.getElementById('c');
 const ctx    = canvas.getContext('2d');
-const W = canvas.width  = 800;
-const H = canvas.height = 450;
+const W = canvas.width  = 960;
+const H = canvas.height = 540;
 
 const GROUND_Y    = H - 80;
 const PLAYER_X    = 130;
+const PLAYER_X2   = 240;
 const PLAYER_SIZE = 52;
 const GRAVITY     = 0.65;
 const JUMP_VY     = -15;
+const MOVE_SPEED  = 3.5;   // horizontal walk speed (px/frame)
 const LEVEL_FRAMES = 2400;
 // Platform floats high enough to walk under (head clearance ~60px) and low enough to jump onto
 const PLATFORM_Y  = GROUND_Y - 160; // feet=370, head=318, platform bottom=256 → 62px gap
@@ -101,8 +103,10 @@ const LEVEL_CFG = [
 ];
 
 // ── State ─────────────────────────────────────────────────────────────────────
-let gs          = 'select'; // 'select'|'playing'|'levelend'|'gameover'|'win'
+let gs          = 'select'; // 'select'|'select2'|'playing'|'levelend'|'gameover'|'win'
 let selAnimal   = 0;
+let selAnimal2  = 0;
+let twoPlayer   = false;
 let level       = 1;
 let lives       = 3;
 let score       = 0;
@@ -110,13 +114,9 @@ let frame       = 0;
 let spawnCD     = 160; // unified spawn stream cooldown
 let gScroll     = 0;
 let hillOff     = 0;
-let invFrames   = 0;
 let flashFrames = 0;
 let greenFrames = 0;
-let jumpHeld    = false; // variable jump: true while jump key is held
-let jumpBoost   = 0;     // remaining frames of upward boost
-let pendingDitchBonus = false; // true when player jumped over a ditch, clears on landing
-let player      = {};
+let players     = [];
 let obstacles   = [];
 let ditches     = [];
 let diamonds    = [];
@@ -125,7 +125,6 @@ let boxDiamondBudget = 0;  // diamonds left to place on box clusters this level
 let lastSpawnType    = ''; // prevents two enemies in a row
 let potions          = [];
 let potionSpawned    = false;
-let floatFrames      = 0;    // >0 = potion flight mode active
 let hearts           = [];
 let heartSpawned     = false; // max 1 heart per 2-level pair
 let popups      = []; // floating score texts
@@ -136,6 +135,17 @@ let clouds      = [
   { x: 730, y: 38,  r: 34 },
 ];
 const keys = {}; // live key state for float mode
+
+// ── Player factory ────────────────────────────────────────────────────────────
+function makePlayer(x, animalIdx) {
+  return {
+    x, y: GROUND_Y, vy: 0, vx: 0, onGround: true, runT: 0,
+    animalIdx,
+    invFrames: 0, floatFrames: 0,
+    jumpHeld: false, jumpBoost: 0,
+    pendingDitchBonus: false,
+  };
+}
 
 // ── Sound ──────────────────────────────────────────────────────────────────────
 let _ac = null;
@@ -283,26 +293,33 @@ function playPuff() {
 }
 
 // ── Input ─────────────────────────────────────────────────────────────────────
-function tryJump() {
-  if (gs === 'playing' && player.onGround) {
-    player.vy       = -8;   // small initial impulse; boost adds up to JUMP_VY=-15
-    player.onGround = false;
-    jumpHeld        = true;
-    jumpBoost       = 14;   // 14 frames × 0.5 px/frame = 7 extra → total vy = -15
+function tryJump(p) {
+  if (gs === 'playing' && p.onGround && p.floatFrames === 0) {
+    p.vy       = -8;
+    p.onGround = false;
+    p.jumpHeld  = true;
+    p.jumpBoost = 14;
     playJump();
   }
 }
 
-function releaseJump() { jumpHeld = false; }
+function releaseJump(p) { p.jumpHeld = false; }
 
 // ── Keyboard
 document.addEventListener('keydown', e => {
   keys[e.code] = true;
-  if (e.code === 'Space' || e.code === 'ArrowUp') {
+  if (e.code === 'ArrowLeft' || e.code === 'ArrowRight' ||
+      e.code === 'ArrowUp'   || e.code === 'ArrowDown') {
     e.preventDefault();
-    if      (gs === 'playing' && floatFrames === 0) tryJump();
+  }
+  if (e.code === 'ArrowUp') {
+    if      (gs === 'playing' && players.length > 0 && players[0].floatFrames === 0) tryJump(players[0]);
     else if (gs === 'levelend')                 advanceLevel();
     else if (gs === 'gameover' || gs === 'win') gs = 'select';
+  }
+  if (e.code === 'KeyW') {
+    e.preventDefault();
+    if (gs === 'playing' && players.length > 1 && players[1].floatFrames === 0) tryJump(players[1]);
   }
   if (e.code === 'Enter') {
     if      (gs === 'levelend')                 advanceLevel();
@@ -311,14 +328,15 @@ document.addEventListener('keydown', e => {
 });
 document.addEventListener('keyup', e => {
   keys[e.code] = false;
-  if (e.code === 'Space' || e.code === 'ArrowUp') releaseJump();
+  if (e.code === 'ArrowUp' && players.length > 0) releaseJump(players[0]);
+  if (e.code === 'KeyW'    && players.length > 1) releaseJump(players[1]);
 });
 
 // ── Mouse: mousedown starts jump (for variable height), click handles UI
 canvas.addEventListener('mousedown', e => {
-  if (gs === 'playing') tryJump();
+  if (gs === 'playing' && players.length > 0) tryJump(players[0]);
 });
-canvas.addEventListener('mouseup', releaseJump);
+canvas.addEventListener('mouseup', () => { if (players.length > 0) releaseJump(players[0]); });
 canvas.addEventListener('click', e => {
   if (gs === 'playing') return; // handled by mousedown
   const r  = canvas.getBoundingClientRect();
@@ -329,11 +347,11 @@ canvas.addEventListener('click', e => {
 // ── Touch: touchstart begins jump, touchend releases boost and handles UI taps
 canvas.addEventListener('touchstart', e => {
   e.preventDefault();
-  if (gs === 'playing') tryJump();
+  if (gs === 'playing' && players.length > 0) tryJump(players[0]);
 }, { passive: false });
 canvas.addEventListener('touchend', e => {
   e.preventDefault();
-  releaseJump();
+  if (players.length > 0) releaseJump(players[0]);
   const r  = canvas.getBoundingClientRect();
   const t  = e.changedTouches[0];
   const mx = (t.clientX - r.left) * W / r.width;
@@ -353,7 +371,26 @@ function handleUIClick(mx, my) {
       }
     }
     const sb = getStartBtn();
-    if (mx >= sb.x && mx <= sb.x + sb.w && my >= sb.y && my <= sb.y + sb.h) startGame();
+    if (mx >= sb.x && mx <= sb.x + sb.w && my >= sb.y && my <= sb.y + sb.h) {
+      gs = 'select2'; return;
+    }
+  }
+  if (gs === 'select2') {
+    const cards = getCardRects();
+    for (let i = 0; i < 5; i++) {
+      const c = cards[i];
+      if (mx >= c.x && mx <= c.x + c.w && my >= c.y && my <= c.y + c.h) {
+        selAnimal2 = i; return;
+      }
+    }
+    const b2 = getTwoPlayerBtn();
+    if (mx >= b2.x && mx <= b2.x + b2.w && my >= b2.y && my <= b2.y + b2.h) {
+      twoPlayer = true; startGame(); return;
+    }
+    const b1 = getSoloBtn();
+    if (mx >= b1.x && mx <= b1.x + b1.w && my >= b1.y && my <= b1.y + b1.h) {
+      twoPlayer = false; startGame(); return;
+    }
   }
 }
 
@@ -367,6 +404,14 @@ function getCardRects() {
 
 function getStartBtn() {
   return { x: W / 2 - 95, y: H / 2 + 100, w: 190, h: 54 };
+}
+
+function getTwoPlayerBtn() {
+  return { x: W / 2 - 120, y: H / 2 + 90, w: 235, h: 50 };
+}
+
+function getSoloBtn() {
+  return { x: W / 2 - 90, y: H / 2 + 152, w: 180, h: 44 };
 }
 
 // ── Game logic ────────────────────────────────────────────────────────────────
@@ -383,25 +428,21 @@ function initLevel() {
   spawnCD     = 160;
   gScroll     = 0;
   hillOff     = 0;
-  invFrames   = 0;
   flashFrames = 0;
   greenFrames = 0;
-  jumpHeld          = false;
-  jumpBoost         = 0;
-  pendingDitchBonus = false;
   obstacles         = [];
   ditches           = [];
   diamonds          = [];
   hearts            = [];
   platformCount     = 0;
-  if (level % 2 === 1) heartSpawned = false; // new 2-level pair: allow 1 heart again
-  boxDiamondBudget  = 10 + Math.floor(Math.random() * 11); // 10–20 per level
+  if (level % 2 === 1) heartSpawned = false;
+  boxDiamondBudget  = 10 + Math.floor(Math.random() * 11);
   lastSpawnType     = '';
   potions           = [];
   potionSpawned     = false;
-  floatFrames       = 0;
   popups            = [];
-  player = { x: PLAYER_X, y: GROUND_Y, vy: 0, onGround: true, runT: 0 };
+  players = [ makePlayer(PLAYER_X, selAnimal) ];
+  if (twoPlayer) players.push(makePlayer(PLAYER_X2, selAnimal2));
   for (const c of clouds) c.x = [90, 330, 570, 730][clouds.indexOf(c)];
 }
 
@@ -418,82 +459,13 @@ function update() {
   const cfg = LEVEL_CFG[level - 1];
   frame++;
   gScroll = (gScroll + cfg.speed) % 50;
-  hillOff += cfg.speed * 0.3; // continuous — no modulo, so no jump-back flicker
+  hillOff += cfg.speed * 0.3;
 
-  // Player physics
-  const prevY = player.y;          // feet position before this frame
-
-  if (floatFrames > 0) {
-    // ── Float mode: gravity off, ArrowUp/Down control altitude ──────────────
-    player.vy = keys['ArrowUp'] ? -2.5 : keys['ArrowDown'] ? 2.5 : 0;
-    player.y  = Math.max(PLAYER_SIZE, player.y + player.vy);
-    player.onGround = false;
-    floatFrames--;
-    if (floatFrames === 0) { playPuff(); }
-  } else {
-    // ── Normal physics ───────────────────────────────────────────────────────
-    player.vy += GRAVITY;
-    player.y  += player.vy;
-    player.onGround = false;          // reset every frame, set below if touching surface
-  }
-
-  // Is the player over a ditch? Once below ground level, keep falling regardless
-  // (ditch may scroll past before player falls far enough otherwise)
-  const aboveDitch = ditches.some(d => player.x > d.x + 8 && player.x < d.x + d.w - 8);
-  const overDitch  = prevY > GROUND_Y || aboveDitch;
-
-  // While airborne over a ditch, mark that a bonus is pending
-  if (aboveDitch && !player.onGround) pendingDitchBonus = true;
-
-  // Ground landing — only in normal mode (float mode never snaps to ground)
-  if (floatFrames === 0 && !overDitch && player.y >= GROUND_Y) {
-    player.y    = GROUND_Y;
-    player.vy   = 0;
-    player.onGround = true;
-    // Reward ditch crossing exactly on landing
-    if (pendingDitchBonus) {
-      pendingDitchBonus = false;
-      addScore(20);
-      popups.push({ x: player.x, y: player.y - 60, text: '+20', life: 55, color: '#a0e060' });
-    }
-  }
-
-  // Fell into ditch (past bottom of screen) — only possible in normal mode
-  if (floatFrames === 0 && player.y > H + 60) {
-    fellIntoDitch();
-    return;
-  }
-
-  // Box/platform top landing: player can stand on boxes and platforms (one-way)
-  // (still active in float mode so collisions remain consistent)
-  if (!player.onGround && player.vy >= 0) {
-    for (const o of obstacles) {
-      if (o.type !== 'box' && o.type !== 'platform') continue;
-      const pL = player.x - PLAYER_SIZE / 2 + 8;
-      const pR = player.x + PLAYER_SIZE / 2 - 8;
-      // Horizontal overlap AND feet just crossed box top this frame
-      if (pR > o.x && pL < o.x + o.w && player.y >= o.y && prevY <= o.y + 6) {
-        player.y    = o.y;
-        player.vy   = 0;
-        player.onGround = true;
-        break;
-      }
-    }
-  }
-
-  // Variable jump boost: extra upward force while key held
-  if (jumpHeld && jumpBoost > 0 && player.vy < 0) {
-    player.vy -= 0.5;
-    jumpBoost--;
-  } else if (player.vy >= 0) {
-    jumpHeld = false; // stop boosting once player starts falling
-  }
-
-  if (player.onGround) {
-    const prevRunT = player.runT;
-    player.runT += 0.038;
-    // Fire step sound once per stride (when runT crosses an integer)
-    if (Math.floor(player.runT) > Math.floor(prevRunT)) playStep();
+  // Update each player (snapshot prevents issues if initLevel is called mid-loop)
+  const activePlayers = [...players];
+  for (const p of activePlayers) {
+    updatePlayer(p, cfg);
+    if (gs !== 'playing') return;
   }
 
   // Clouds
@@ -503,54 +475,61 @@ function update() {
   }
 
   // Timers
-  if (invFrames   > 0) invFrames--;
   if (flashFrames > 0) flashFrames--;
   if (greenFrames > 0) greenFrames--;
 
   // Update floating popups
-  for (const p of popups) { p.y -= 1.5; p.life--; }
-  popups = popups.filter(p => p.life > 0);
+  for (const pp of popups) { pp.y -= 1.5; pp.life--; }
+  popups = popups.filter(pp => pp.life > 0);
 
   // Move & cull
   for (const o of obstacles) o.x -= cfg.speed;
   obstacles = obstacles.filter(o => o.x > -200);
   for (const d of ditches) d.x -= cfg.speed;
   ditches = ditches.filter(d => d.x + d.w > -10);
+
   for (const h of hearts) h.x -= cfg.speed;
   hearts = hearts.filter(h => {
     if (h.x < -20) return false;
-    if (Math.abs(player.x - h.x) < PLAYER_SIZE / 2 + 10 &&
-        Math.abs((player.y - PLAYER_SIZE / 2) - h.y) < PLAYER_SIZE / 2 + 10) {
-      lives = Math.min(lives + 1, 9);
-      greenFrames = 14;
-      playHeart();
-      popups.push({ x: h.x, y: h.y - 10, text: '❤️ +1', life: 80, color: '#ff4488' });
-      return false;
+    for (const p of players) {
+      if (Math.abs(p.x - h.x) < PLAYER_SIZE / 2 + 10 &&
+          Math.abs((p.y - PLAYER_SIZE / 2) - h.y) < PLAYER_SIZE / 2 + 10) {
+        lives = Math.min(lives + 1, 9);
+        greenFrames = 14;
+        playHeart();
+        popups.push({ x: h.x, y: h.y - 10, text: '❤️ +1', life: 80, color: '#ff4488' });
+        return false;
+      }
     }
     return true;
   });
-  for (const p of potions) p.x -= cfg.speed;
-  potions = potions.filter(p => {
-    if (p.x < -20) return false;
-    if (Math.abs(player.x - p.x) < PLAYER_SIZE / 2 + 10 &&
-        Math.abs((player.y - PLAYER_SIZE / 2) - p.y) < PLAYER_SIZE / 2 + 10) {
-      floatFrames = 450; // 7.5 seconds at 60 fps
-      playPotion();
-      popups.push({ x: p.x, y: p.y - 10, text: '✨ Schweben!', life: 90, color: '#80ff80' });
-      return false;
+
+  for (const po of potions) po.x -= cfg.speed;
+  potions = potions.filter(po => {
+    if (po.x < -20) return false;
+    for (const p of players) {
+      if (Math.abs(p.x - po.x) < PLAYER_SIZE / 2 + 10 &&
+          Math.abs((p.y - PLAYER_SIZE / 2) - po.y) < PLAYER_SIZE / 2 + 10) {
+        p.floatFrames = 450;
+        playPotion();
+        popups.push({ x: po.x, y: po.y - 10, text: '✨ Schweben!', life: 90, color: '#80ff80' });
+        return false;
+      }
     }
     return true;
   });
+
   for (const d of diamonds) d.x -= cfg.speed;
   diamonds = diamonds.filter(d => {
     if (d.x < -20) return false;
-    // Collect if player overlaps diamond
-    if (Math.abs(player.x - d.x) < PLAYER_SIZE / 2 + 6 &&
-        Math.abs((player.y - PLAYER_SIZE / 2) - d.y) < PLAYER_SIZE / 2 + 6) {
-      addScore(d.pts);
-      playPling();
-      popups.push({ x: d.x, y: d.y - 10, text: `+${d.pts}`, life: 45, color: d.color });
-      return false;
+    for (const p of players) {
+      if (Math.abs(p.x - d.x) < PLAYER_SIZE / 2 + 6 &&
+          Math.abs((p.y - PLAYER_SIZE / 2) - d.y) < PLAYER_SIZE / 2 + 6) {
+        addScore(d.pts);
+        playPling();
+        popups.push({ x: d.x, y: d.y - 10, text: `+${d.pts}`, life: 45, color: d.color });
+        return false;
+      }
     }
     return true;
   });
@@ -579,37 +558,111 @@ function update() {
   // Unified spawn stream — stop well before the flag arrives for a clean finish
   const flagTravelFrames = Math.ceil((W + 20 - PLAYER_X) / cfg.speed);
   const flagSpawnFrame   = LEVEL_FRAMES - 15 - flagTravelFrames;
-  const clearZoneFrames  = Math.ceil(350 / cfg.speed); // ~350 px runway before flag
+  const clearZoneFrames  = Math.ceil(350 / cfg.speed);
   spawnCD--;
   if (spawnCD <= 0 && frame < flagSpawnFrame - clearZoneFrames) spawnNext(cfg);
 
-  // Spawn finish flag; also purge any obstacles/ditches still far to the right
   if (frame === flagSpawnFrame) {
     obstacles.push({ x: W + 20, type: 'flag' });
-    // Remove anything spawned too recently that would crowd the flag
     obstacles = obstacles.filter(o => o.type === 'flag' || o.x < W);
     ditches   = ditches.filter(d => d.x + d.w < W);
   }
 
-  // Collision
-  if (invFrames === 0) {
-    for (const o of obstacles) {
-      if (o.type === 'flag' || o.type === 'platform') continue;
-      if (!overlaps(player, o)) continue;
-      if (o.type === 'box') {
-        if (player.vy >= 0 && player.y > o.y + 5) hit(o);
-      } else if (o.type === 'lion') {
-        if (!player.onGround && player.vy > 0) stomp(o, 100);
-        else hit(o);
-      } else if (o.type === 'vulture') {
-        if (!player.onGround && player.vy > 0) stomp(o, 150);
-        else hit(o);
+  // Collision for each player
+  for (const p of players) {
+    if (p.invFrames === 0) {
+      for (const o of obstacles) {
+        if (o.type === 'flag' || o.type === 'platform') continue;
+        if (!overlaps(p, o)) continue;
+        if (o.type === 'box') {
+          if (p.vy >= 0 && p.y > o.y + 5) hitP(p, o);
+        } else if (o.type === 'lion') {
+          if (!p.onGround && p.vy > 0) stompP(p, o, 100); else hitP(p, o);
+        } else if (o.type === 'vulture') {
+          if (!p.onGround && p.vy > 0) stompP(p, o, 150); else hitP(p, o);
+        }
+        break;
       }
-      break;
     }
   }
 
   if (frame >= LEVEL_FRAMES) gs = 'levelend';
+}
+
+function updatePlayer(p, cfg) {
+  const prevY = p.y;
+
+  if (p.floatFrames > 0) {
+    const isP1  = p === players[0];
+    const upKey = isP1 ? keys['ArrowUp']  : keys['KeyW'];
+    const dnKey = isP1 ? keys['ArrowDown'] : keys['KeyS'];
+    p.vy = upKey ? -2.5 : dnKey ? 2.5 : 0;
+    p.y  = Math.max(PLAYER_SIZE, p.y + p.vy);
+    p.onGround = false;
+    p.floatFrames--;
+    if (p.floatFrames === 0) playPuff();
+  } else {
+    p.vy += GRAVITY;
+    p.y  += p.vy;
+    p.onGround = false;
+  }
+
+  // Horizontal movement
+  const isP1     = p === players[0];
+  const leftKey  = isP1 ? keys['ArrowLeft']  : keys['KeyA'];
+  const rightKey = isP1 ? keys['ArrowRight'] : keys['KeyD'];
+  p.vx = rightKey ? MOVE_SPEED : leftKey ? -MOVE_SPEED : 0;
+  p.x  = Math.max(PLAYER_SIZE / 2 + 4, Math.min(W - PLAYER_SIZE / 2 - 4, p.x + p.vx));
+
+  const aboveDitch = ditches.some(d => p.x > d.x + 8 && p.x < d.x + d.w - 8);
+  const overDitch  = prevY > GROUND_Y || aboveDitch;
+
+  if (aboveDitch && !p.onGround) p.pendingDitchBonus = true;
+
+  if (p.floatFrames === 0 && !overDitch && p.y >= GROUND_Y) {
+    p.y = GROUND_Y;
+    p.vy = 0;
+    p.onGround = true;
+    if (p.pendingDitchBonus) {
+      p.pendingDitchBonus = false;
+      addScore(20);
+      popups.push({ x: p.x, y: p.y - 60, text: '+20', life: 55, color: '#a0e060' });
+    }
+  }
+
+  if (p.floatFrames === 0 && p.y > H + 60) {
+    fellIntoDitchP(p);
+    return;
+  }
+
+  if (!p.onGround && p.vy >= 0) {
+    for (const o of obstacles) {
+      if (o.type !== 'box' && o.type !== 'platform') continue;
+      const pL = p.x - PLAYER_SIZE / 2 + 8;
+      const pR = p.x + PLAYER_SIZE / 2 - 8;
+      if (pR > o.x && pL < o.x + o.w && p.y >= o.y && prevY <= o.y + 6) {
+        p.y = o.y;
+        p.vy = 0;
+        p.onGround = true;
+        break;
+      }
+    }
+  }
+
+  if (p.jumpHeld && p.jumpBoost > 0 && p.vy < 0) {
+    p.vy -= 0.5;
+    p.jumpBoost--;
+  } else if (p.vy >= 0) {
+    p.jumpHeld = false;
+  }
+
+  if (p.onGround) {
+    const prevRunT = p.runT;
+    p.runT += 0.038;
+    if (p.vx !== 0 && Math.floor(p.runT) > Math.floor(prevRunT)) playStep();
+  }
+
+  if (p.invFrames > 0) p.invFrames--;
 }
 
 // ── Spawn helpers ─────────────────────────────────────────────────────────────
@@ -815,31 +868,29 @@ function addScore(pts) {
   }
 }
 
-function stomp(o, pts = 100) {
-  const cx = o.x + o.w / 2;
-  const cy = o.y;
+function stompP(p, o, pts = 100) {
+  const cx = o.x + o.w / 2, cy = o.y;
   o.x = -600;
   playPunch();
-  player.vy = JUMP_VY * 0.6;
+  p.vy = JUMP_VY * 0.6;
   addScore(pts);
   popups.push({ x: cx, y: cy, text: `+${pts}`, life: 55, color: '#FFD700' });
 }
 
-function hit(o) {
+function hitP(p, o) {
   o.x = -600;
   lives--;
-  invFrames   = 110;
+  p.invFrames = 110;
   flashFrames = 18;
   if (lives <= 0) gs = 'gameover';
 }
 
-function fellIntoDitch() {
+function fellIntoDitchP(p) {
   lives--;
   flashFrames = 22;
   if (lives <= 0) {
     gs = 'gameover';
   } else {
-    // Restart level, keep score and lives
     initLevel();
     gs = 'playing';
   }
@@ -849,14 +900,15 @@ function fellIntoDitch() {
 function draw() {
   ctx.clearRect(0, 0, W, H);
 
-  if (gs === 'select') { drawSelect(); return; }
+  if (gs === 'select')  { drawSelect();  return; }
+  if (gs === 'select2') { drawSelect2(); return; }
 
   drawBackground();
   drawObstacles();
   drawDiamonds();
   drawHearts();
   drawPotions();
-  drawPlayer();
+  drawPlayers();
   drawPopups();
   drawHUD();
 
@@ -879,7 +931,7 @@ function draw() {
       `Level ${level} · ${score} Punkte`);
   } else if (gs === 'win') {
     drawOverlay('🏆 Du hast gewonnen!', '🎮 Nochmal spielen',
-      `${ANIMALS[selAnimal].name} · ${score} Punkte`);
+      `${score} Punkte`);
   }
 }
 
@@ -1418,28 +1470,35 @@ function drawAnimalSprite(cx, groundY, idx, runT, onGround) {
   ctx.restore();
 }
 
-// ── Player ────────────────────────────────────────────────────────────────────
-function drawPlayer() {
-  if (invFrames > 0 && Math.floor(invFrames / 7) % 2 === 1) return;
-  if (floatFrames > 0) {
-    // Green glow aura behind player
-    const pulse = 0.25 + 0.15 * Math.sin(frame * 0.2);
-    ctx.save();
-    ctx.globalAlpha = pulse;
-    ctx.fillStyle = '#40ff80';
-    ctx.beginPath();
-    ctx.ellipse(player.x, player.y - PLAYER_SIZE * 0.5, PLAYER_SIZE * 0.6, PLAYER_SIZE * 0.6, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
-    // Float timer bar above player
-    const barW = 36;
-    const ratio = floatFrames / 300;
-    ctx.fillStyle = 'rgba(0,0,0,0.35)';
-    ctx.fillRect(player.x - barW / 2, player.y - PLAYER_SIZE - 10, barW, 5);
-    ctx.fillStyle = `hsl(${120 * ratio},100%,50%)`;
-    ctx.fillRect(player.x - barW / 2, player.y - PLAYER_SIZE - 10, barW * ratio, 5);
+// ── Players ───────────────────────────────────────────────────────────────────
+function drawPlayers() {
+  for (const p of players) {
+    if (p.invFrames > 0 && Math.floor(p.invFrames / 7) % 2 === 1) continue;
+    if (p.floatFrames > 0) {
+      const pulse = 0.25 + 0.15 * Math.sin(frame * 0.2);
+      ctx.save();
+      ctx.globalAlpha = pulse;
+      ctx.fillStyle = '#40ff80';
+      ctx.beginPath();
+      ctx.ellipse(p.x, p.y - PLAYER_SIZE * 0.5, PLAYER_SIZE * 0.6, PLAYER_SIZE * 0.6, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      const barW = 36;
+      const ratio = p.floatFrames / 300;
+      ctx.fillStyle = 'rgba(0,0,0,0.35)';
+      ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 10, barW, 5);
+      ctx.fillStyle = `hsl(${120 * ratio},100%,50%)`;
+      ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 10, barW * ratio, 5);
+    }
+    drawAnimalSprite(p.x, p.y, p.animalIdx, p.runT, p.onGround);
+    if (twoPlayer) {
+      const label = p === players[0] ? 'P1' : 'P2';
+      ctx.fillStyle = p === players[0] ? '#80ddff' : '#ffdd80';
+      ctx.font = 'bold 11px Arial';
+      ctx.textAlign = 'center';
+      ctx.fillText(label, p.x, p.y - PLAYER_SIZE - 4);
+    }
   }
-  drawAnimalSprite(player.x, player.y, selAnimal, player.runT, player.onGround);
 }
 
 // ── Floating score popups ─────────────────────────────────────────────────────
@@ -1612,7 +1671,7 @@ function drawSelect() {
   const dotY = sb.y + sb.h + 28;
   ctx.fillStyle = 'rgba(255,255,255,0.4)';
   ctx.font      = '13px Arial';
-  ctx.fillText('5 Level  ·  3 Leben  ·  Leertaste / Klick / Tap = Springen', W / 2, dotY);
+  ctx.fillText('5 Level  ·  3 Leben  ·  ↑ / Klick / Tap = Springen  ·  W = Spieler 2', W / 2, dotY);
   ctx.fillText('Auf Löwen springen = +100 Punkte  ·  1000 Punkte = +1 Leben', W / 2, dotY + 20);
 
   // Difficulty dots
@@ -1630,6 +1689,78 @@ function drawSelect() {
   ctx.fillStyle = 'rgba(255,255,255,0.3)';
   ctx.font      = '11px Arial';
   ctx.fillText('Schwierigkeit', W / 2, dotY + 62);
+}
+
+// ── Select 2 screen ───────────────────────────────────────────────────────────
+function drawSelect2() {
+  ctx.drawImage(starsBg, 0, 0);
+
+  ctx.font        = 'bold 44px Arial';
+  ctx.textAlign   = 'center';
+  ctx.strokeStyle = '#7a5200';
+  ctx.lineWidth   = 5;
+  ctx.strokeText('Spieler 2 – Tier wählen', W / 2, 76);
+  ctx.fillStyle   = '#f5c842';
+  ctx.fillText('Spieler 2 – Tier wählen', W / 2, 76);
+
+  ctx.fillStyle = '#dde';
+  ctx.font      = '18px Arial';
+  ctx.fillText('Spieler 2 steuert mit:  W = Springen  ·  S = Sinken (Trank)', W / 2, 112);
+
+  const cards = getCardRects();
+  for (let i = 0; i < 5; i++) {
+    const c   = cards[i];
+    const sel = i === selAnimal2;
+
+    ctx.fillStyle = sel ? 'rgba(243,156,18,0.35)' : 'rgba(0,0,0,0.3)';
+    ctx.fillRect(c.x + 4, c.y + 4, c.w, c.h);
+
+    ctx.fillStyle   = sel ? '#2d4a22' : '#1e2a4a';
+    ctx.strokeStyle = sel ? '#f5c842' : '#3a4a6a';
+    ctx.lineWidth   = sel ? 3 : 1.5;
+    rrect(c.x, c.y, c.w, c.h, 12);
+    ctx.fill(); ctx.stroke();
+
+    ctx.save();
+    ctx.translate(c.x + c.w / 2, c.y + 91);
+    ctx.scale(0.76, 0.76);
+    DRAW_FUNS[i](6, -6, false);
+    ctx.restore();
+
+    ctx.fillStyle = sel ? '#f5c842' : '#99aacc';
+    ctx.font      = sel ? 'bold 15px Arial' : '14px Arial';
+    ctx.fillText(ANIMALS[i].name, c.x + c.w / 2, c.y + 100);
+
+    if (sel) {
+      ctx.fillStyle = '#f5c842';
+      ctx.font      = 'bold 17px Arial';
+      ctx.fillText('✓', c.x + c.w / 2, c.y + 17);
+    }
+  }
+
+  // "Mit 2 Spielern!" button
+  const b2 = getTwoPlayerBtn();
+  ctx.fillStyle = 'rgba(39,174,96,0.30)';
+  rrect(b2.x - 4, b2.y - 4, b2.w + 8, b2.h + 8, 18); ctx.fill();
+  ctx.fillStyle   = '#218a45';
+  ctx.strokeStyle = '#2ecc71';
+  ctx.lineWidth   = 2;
+  rrect(b2.x, b2.y, b2.w, b2.h, 14);
+  ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#fff';
+  ctx.font      = 'bold 22px Arial';
+  ctx.fillText('▶  Mit 2 Spielern!', W / 2, b2.y + 34);
+
+  // "Alleine spielen" button
+  const b1 = getSoloBtn();
+  ctx.fillStyle   = '#1e2a4a';
+  ctx.strokeStyle = '#4a6a8a';
+  ctx.lineWidth   = 1.5;
+  rrect(b1.x, b1.y, b1.w, b1.h, 12);
+  ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#99aacc';
+  ctx.font      = '18px Arial';
+  ctx.fillText('Alleine spielen', W / 2, b1.y + 29);
 }
 
 // ── Utility ───────────────────────────────────────────────────────────────────
