@@ -713,7 +713,7 @@ function spawnNext(cfg) {
     enemySpawned = true;
     lastSpawnType = 'vulture';
 
-  } else if (Math.random() < 0.35) {
+  } else if (Math.random() < (twoPlayer ? 0.52 : 0.35)) {
     // Floating platform with stepping-stone boxes
     const n = Math.max(2, Math.floor(Math.random() * 5) + 2);
     spawnedWidth = spawnPlatform(n);
@@ -731,6 +731,17 @@ function spawnNext(cfg) {
   const gapMin = enemySpawned ? Math.max(cfg.gapLo, 340) : cfg.gapLo;
   const gapPx  = gapMin + Math.random() * (cfg.gapHi - gapMin);
   spawnCD = Math.round((spawnedWidth + gapPx) / cfg.speed);
+
+  // Occasionally scatter ground-level diamonds in the gap (clear of any obstacle)
+  if (boxDiamondBudget > 0 && lastSpawnType !== 'ditch' && Math.random() < 0.45) {
+    const count    = 1 + Math.floor(Math.random() * 3);
+    const gapStart = W + 20 + (spawnedWidth || 0) + 50;
+    const spacing  = 44 + Math.floor(Math.random() * 36);
+    for (let i = 0; i < count && boxDiamondBudget > 0; i++) {
+      diamonds.push({ x: gapStart + i * spacing, y: GROUND_Y - 20, color: '#38c8ff', pts: 10 });
+      boxDiamondBudget--;
+    }
+  }
 }
 
 function clusterSize() {
@@ -771,11 +782,14 @@ function spawnCluster(n) {
     }
   });
 
-  // Very rarely spawn a potion on top of a random bottom-row box (max 1 per level)
+  // Spawn potion only on single-height columns (no box stacked on top)
   if (!potionSpawned && Math.random() < 0.2) {
-    const pi = Math.floor(Math.random() * n);
-    potions.push({ x: x0 + pi * BOX_W + BOX_W / 2, y: GROUND_Y - BOX_H - 22 });
-    potionSpawned = true;
+    const singleCols = [...colTop.entries()].filter(([, topY]) => topY === GROUND_Y - BOX_H);
+    if (singleCols.length > 0) {
+      const [bx] = singleCols[Math.floor(Math.random() * singleCols.length)];
+      potions.push({ x: bx + BOX_W / 2, y: GROUND_Y - BOX_H - 22 });
+      potionSpawned = true;
+    }
   }
 
   // Place 1–2 diamonds on randomly chosen columns, always at the column's topmost box.
@@ -1667,28 +1681,65 @@ function drawSelect() {
   ctx.textAlign = 'center';
   ctx.fillText('▶  Spielen!', W / 2, sb.y + 36);
 
-  // Controls hint
-  const dotY = sb.y + sb.h + 28;
-  ctx.fillStyle = 'rgba(255,255,255,0.4)';
-  ctx.font      = '13px Arial';
-  ctx.fillText('5 Level  ·  3 Leben  ·  ↑ / Klick / Tap = Springen  ·  W = Spieler 2', W / 2, dotY);
-  ctx.fillText('Auf Löwen springen = +100 Punkte  ·  1000 Punkte = +1 Leben', W / 2, dotY + 20);
+  // ── Controls panel ──────────────────────────────────────────────────────────
+  const ctrlY = sb.y + sb.h + 22;
+  const colW  = 220;
+  const col1  = W / 2 - colW - 20;
+  const col2  = W / 2 + 20;
+
+  // Panel background
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  rrect(col1 - 14, ctrlY - 6, colW * 2 + 68, 106, 10);
+  ctx.fill();
+
+  // Column headers
+  ctx.font      = 'bold 13px Arial';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#80ddff';
+  ctx.fillText('Spieler 1', col1, ctrlY + 12);
+  ctx.fillStyle = '#ffdd80';
+  ctx.fillText('Spieler 2', col2, ctrlY + 12);
+
+  // Divider line
+  ctx.fillStyle = 'rgba(255,255,255,0.15)';
+  ctx.fillRect(W / 2 - 1, ctrlY, 2, 96);
+
+  // Key rows
+  const rows = [
+    ['↑  Springen',          'W  Springen'],
+    ['← →  Laufen',         'A D  Laufen'],
+    ['↑ ↓  Schweben (Trank)','W S  Schweben (Trank)'],
+    ['Klick / Tap  Springen', '—'],
+  ];
+  ctx.font      = '12px Arial';
+  ctx.fillStyle = 'rgba(255,255,255,0.75)';
+  rows.forEach((row, i) => {
+    ctx.fillText(row[0], col1, ctrlY + 30 + i * 18);
+    ctx.fillText(row[1], col2, ctrlY + 30 + i * 18);
+  });
+
+  // Bonus info row
+  ctx.textAlign = 'center';
+  ctx.fillStyle = 'rgba(255,255,255,0.35)';
+  ctx.font      = '11px Arial';
+  ctx.fillText('Löwe/Geier springen +100/+150  ·  Graben überspringen +20  ·  1000 Punkte = +1 Leben', W / 2, ctrlY + 104);
 
   // Difficulty dots
+  const dotY      = ctrlY + 120;
   const dotStartX = W / 2 - 60;
   for (let i = 0; i < 5; i++) {
     const ratio = (i + 1) / 5;
     ctx.fillStyle = `hsl(${120 - ratio * 120}, 80%, 55%)`;
     ctx.beginPath();
-    ctx.arc(dotStartX + i * 30, dotY + 42, 7, 0, Math.PI * 2);
+    ctx.arc(dotStartX + i * 30, dotY, 7, 0, Math.PI * 2);
     ctx.fill();
     ctx.fillStyle = 'rgba(255,255,255,0.7)';
     ctx.font      = 'bold 9px Arial';
-    ctx.fillText(i + 1, dotStartX + i * 30, dotY + 46);
+    ctx.fillText(i + 1, dotStartX + i * 30, dotY + 4);
   }
   ctx.fillStyle = 'rgba(255,255,255,0.3)';
   ctx.font      = '11px Arial';
-  ctx.fillText('Schwierigkeit', W / 2, dotY + 62);
+  ctx.fillText('Schwierigkeit', W / 2, dotY + 20);
 }
 
 // ── Select 2 screen ───────────────────────────────────────────────────────────
