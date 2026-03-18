@@ -482,19 +482,20 @@ function clusterSize() {
   return 8;
 }
 
-// Returns array of layer widths bottom→top. Each layer ≥ 2 and 2 narrower than the one below.
-// Future: add a maxLayers param to cap at e.g. 3 rows.
+// Returns array of layer widths bottom→top.
+// Each layer is 3 narrower (min 2), offset 2 boxes right → 2-wide left steps.
+// Base 8 → [8, 5, 2], base 6 → [6, 3], base 4 → [4] etc.
 function buildLayers(baseWidth) {
   const layers = [baseWidth];
-  let w = baseWidth - 2;
-  while (w >= 2) { layers.push(w); w -= 2; }
+  let w = baseWidth - 3;
+  while (w >= 2) { layers.push(w); w -= 3; }
   return layers;
 }
 
 function spawnCluster(n) {
   const x0 = W + 20;
   buildLayers(n).forEach((layerW, row) => {
-    const xOff = row * BOX_W; // center each layer: offset by 1 box per row
+    const xOff = row * 2 * BOX_W; // 2-box left offset per row → 2-wide approach steps
     const y = GROUND_Y - BOX_H * (row + 1);
     for (let i = 0; i < layerW; i++) {
       obstacles.push({ x: x0 + xOff + i * BOX_W, y, w: BOX_W, h: BOX_H, type: 'box' });
