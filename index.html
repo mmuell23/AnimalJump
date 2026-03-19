@@ -45,6 +45,7 @@ const LEVEL_FRAMES = 2400;
 // Platform floats high enough to walk under (head clearance ~60px) and low enough to jump onto
 const PLATFORM_Y  = GROUND_Y - 160; // feet=370, head=318, platform bottom=256 → 62px gap
 const PLATFORM_Y2 = PLATFORM_Y - 100; // second tier: reachable from P1, not from ground
+const PLATFORM_Y3 = PLATFORM_Y2 - 90; // third tier: reachable from P2, ~y=110
 
 // ── Pre-render static assets ──────────────────────────────────────────────────
 // Stars background (drawn once, reused every frame on select screen)
@@ -290,6 +291,23 @@ function playPuff() {
     src.connect(filt); filt.connect(gain); gain.connect(ac.destination);
     gain.gain.setValueAtTime(0.3, ac.currentTime);
     src.start(ac.currentTime);
+  } catch(e) {}
+}
+
+function playBoing() {
+  try {
+    const ac = getAC();
+    const t  = ac.currentTime;
+    const osc  = ac.createOscillator();
+    const gain = ac.createGain();
+    osc.connect(gain); gain.connect(ac.destination);
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(140, t);
+    osc.frequency.exponentialRampToValueAtTime(520, t + 0.12);
+    osc.frequency.exponentialRampToValueAtTime(320, t + 0.32);
+    gain.gain.setValueAtTime(0.35, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.38);
+    osc.start(t); osc.stop(t + 0.38);
   } catch(e) {}
 }
 
@@ -623,10 +641,12 @@ function updatePlayer(p, cfg) {
   }
 
   // Horizontal movement
-  const isP1     = p === players[0];
-  const leftKey  = isP1 ? keys['ArrowLeft']  : keys['KeyA'];
-  const rightKey = isP1 ? keys['ArrowRight'] : keys['KeyD'];
-  p.vx = rightKey ? MOVE_SPEED : leftKey ? -MOVE_SPEED : 0;
+  // Left speed = 65 % of world scroll → always visibly leftward but never faster than scroll
+  const isP1      = p === players[0];
+  const leftKey   = isP1 ? keys['ArrowLeft']  : keys['KeyA'];
+  const rightKey  = isP1 ? keys['ArrowRight'] : keys['KeyD'];
+  const leftSpeed = cfg.speed * 0.65;
+  p.vx = rightKey ? MOVE_SPEED : leftKey ? -leftSpeed : 0;
   p.x  = Math.max(PLAYER_SIZE / 2 + 4, Math.min(W - PLAYER_SIZE / 2 - 4, p.x + p.vx));
 
   const aboveDitch = ditches.some(d => p.x > d.x + 8 && p.x < d.x + d.w - 8);
@@ -657,8 +677,17 @@ function updatePlayer(p, cfg) {
       const pR = p.x + PLAYER_SIZE / 2 - 8;
       if (pR > o.x && pL < o.x + o.w && p.y >= o.y && prevY <= o.y + 6) {
         p.y = o.y;
-        p.vy = 0;
-        p.onGround = true;
+        if (o.trampoline) {
+          // Super-jump: ~360 px upward — enough to reach high diamonds at y≈60–130
+          p.vy       = JUMP_VY * 1.45;
+          p.jumpHeld = false;
+          p.jumpBoost = 0;
+          p.onGround  = false;
+          playBoing();
+        } else {
+          p.vy = 0;
+          p.onGround = true;
+        }
         break;
       }
     }
@@ -787,15 +816,27 @@ function spawnCluster(n) {
   // Track the topmost (lowest y value) box per x-column so diamonds land on the peak
   const colTop = new Map(); // box left-x → minimum y seen
 
+  // Store object refs so we can mark trampolines after all layers are built
+  const colTopRef = new Map(); // bx → obstacle object at the topmost position
+
   buildLayers(n).forEach((layerW, row) => {
     const xOff = row * 2 * BOX_W;
     const y = GROUND_Y - BOX_H * (row + 1);
     for (let i = 0; i < layerW; i++) {
       const bx = x0 + xOff + i * BOX_W;
-      obstacles.push({ x: bx, y, w: BOX_W, h: BOX_H, type: 'box' });
-      if (!colTop.has(bx) || y < colTop.get(bx)) colTop.set(bx, y);
+      const obj = { x: bx, y, w: BOX_W, h: BOX_H, type: 'box' };
+      obstacles.push(obj);
+      if (!colTop.has(bx) || y < colTop.get(bx)) {
+        colTop.set(bx, y);
+        colTopRef.set(bx, obj);
+      }
     }
   });
+
+  // Mark ~1 in 10 topmost boxes as trampolines (pink, super-jump on landing)
+  for (const obj of colTopRef.values()) {
+    if (Math.random() < 0.10) obj.trampoline = true;
+  }
 
   // Spawn potion only on single-height columns (no box stacked on top)
   if (!potionSpawned && Math.random() < 0.2) {
@@ -859,22 +900,37 @@ function spawnPlatform(n) {
 
   // 45% chance: add a second, higher platform reachable from this one
   let tier2Width = 0;
+  let tier3Width = 0;
+  let plat2X = 0, n2 = 0;
   if (Math.random() < 0.45) {
-    const n2   = 1 + Math.floor(Math.random() * 3);           // 1–3 wide
-    const gap2 = BOX_W + Math.floor(Math.random() * 2) * BOX_W; // 1–3 box gap
-    const plat2X = platX + n * BOX_W + gap2;
+    n2           = 1 + Math.floor(Math.random() * 3);
+    const gap2   = BOX_W + Math.floor(Math.random() * 2) * BOX_W;
+    plat2X       = platX + n * BOX_W + gap2;
     for (let i = 0; i < n2; i++) {
       obstacles.push({ x: plat2X + i * BOX_W, y: PLATFORM_Y2, w: BOX_W, h: BOX_H, type: 'platform' });
     }
-    // 50% chance of exactly 1 red diamond on a random cell of the tier-2 platform
     if (Math.random() < 0.5) {
       const ri = Math.floor(Math.random() * n2);
       diamonds.push({ x: plat2X + ri * BOX_W + BOX_W / 2, y: PLATFORM_Y2 - 16, color: '#ff2244', pts: 30 });
     }
     tier2Width = gap2 + n2 * BOX_W;
+
+    // 30% chance: add a third, even higher platform reachable from tier 2
+    if (Math.random() < 0.60) {
+      const n3     = 1 + Math.floor(Math.random() * 2);
+      const gap3   = BOX_W + Math.floor(Math.random() * 2) * BOX_W;
+      const plat3X = plat2X + n2 * BOX_W + gap3;
+      for (let i = 0; i < n3; i++) {
+        obstacles.push({ x: plat3X + i * BOX_W, y: PLATFORM_Y3, w: BOX_W, h: BOX_H, type: 'platform' });
+      }
+      // Purple diamond (+50) on tier 3
+      const ri = Math.floor(Math.random() * n3);
+      diamonds.push({ x: plat3X + ri * BOX_W + BOX_W / 2, y: PLATFORM_Y3 - 16, color: '#cc44ff', pts: 50 });
+      tier3Width = gap3 + n3 * BOX_W;
+    }
   }
 
-  return stepW * BOX_W + gap + n * BOX_W + tier2Width;
+  return stepW * BOX_W + gap + n * BOX_W + tier2Width + tier3Width;
 }
 
 function overlaps(p, o) {
@@ -1154,7 +1210,7 @@ function drawDiamonds() {
     ctx.closePath();
     ctx.fill();
     // Outline
-    ctx.strokeStyle = high ? 'rgba(200,150,0,0.9)' : d.pts > 10 ? 'rgba(200,0,60,0.8)' : 'rgba(0,160,220,0.8)';
+    ctx.strokeStyle = high ? 'rgba(200,150,0,0.9)' : d.pts === 50 ? 'rgba(160,0,220,0.9)' : d.pts > 10 ? 'rgba(200,0,60,0.8)' : 'rgba(0,160,220,0.8)';
     ctx.lineWidth = high ? 1.5 : 1;
     ctx.beginPath();
     ctx.moveTo(0, -s);
@@ -1255,26 +1311,49 @@ function drawVulture(o) {
 function drawObstacles() {
   for (const o of obstacles) {
     if (o.type === 'box') {
-      // Drop shadow (CSS-style offset, not ctx.shadowBlur)
+      // Drop shadow
       ctx.fillStyle = 'rgba(0,0,0,0.22)';
       ctx.fillRect(o.x + 5, o.y + o.h, o.w, 6);
 
-      // Body gradient
-      const bg = ctx.createLinearGradient(o.x, o.y, o.x + o.w, o.y + o.h);
-      bg.addColorStop(0, '#C87941');
-      bg.addColorStop(1, '#7A4420');
-      ctx.fillStyle = bg;
-      ctx.fillRect(o.x, o.y, o.w, o.h);
-
-      // Cross stripes
-      ctx.fillStyle = '#5C3010';
-      ctx.fillRect(o.x + o.w / 2 - 2, o.y,              4,    o.h);
-      ctx.fillRect(o.x,                o.y + o.h / 2 - 2, o.w,  4);
-
-      // Highlight edge
-      ctx.fillStyle = '#E8A060';
-      ctx.fillRect(o.x, o.y, o.w, 3);
-      ctx.fillRect(o.x, o.y,   3, o.h);
+      if (o.trampoline) {
+        // ── Trampolin-Kiste (rosa) ──────────────────────────────────────────
+        const bg = ctx.createLinearGradient(o.x, o.y, o.x + o.w, o.y + o.h);
+        bg.addColorStop(0, '#FF88BB');
+        bg.addColorStop(1, '#CC1166');
+        ctx.fillStyle = bg;
+        ctx.fillRect(o.x, o.y, o.w, o.h);
+        // Spring coils
+        ctx.strokeStyle = '#FF44AA';
+        ctx.lineWidth = 1.5;
+        for (let si = 1; si <= 3; si++) {
+          const sx = o.x + (o.w / 4) * si;
+          ctx.beginPath(); ctx.moveTo(sx, o.y + 5); ctx.lineTo(sx, o.y + o.h - 5); ctx.stroke();
+        }
+        // Arrow hint (↑)
+        ctx.fillStyle = 'rgba(255,255,255,0.75)';
+        ctx.font = 'bold 14px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText('↑', o.x + o.w / 2, o.y + o.h - 8);
+        // Highlight edge
+        ctx.fillStyle = '#FFB0D4';
+        ctx.fillRect(o.x, o.y, o.w, 3);
+        ctx.fillRect(o.x, o.y, 3, o.h);
+      } else {
+        // ── Normal box ─────────────────────────────────────────────────────
+        const bg = ctx.createLinearGradient(o.x, o.y, o.x + o.w, o.y + o.h);
+        bg.addColorStop(0, '#C87941');
+        bg.addColorStop(1, '#7A4420');
+        ctx.fillStyle = bg;
+        ctx.fillRect(o.x, o.y, o.w, o.h);
+        // Cross stripes
+        ctx.fillStyle = '#5C3010';
+        ctx.fillRect(o.x + o.w / 2 - 2, o.y,               4, o.h);
+        ctx.fillRect(o.x,                o.y + o.h / 2 - 2, o.w, 4);
+        // Highlight edge
+        ctx.fillStyle = '#E8A060';
+        ctx.fillRect(o.x, o.y, o.w, 3);
+        ctx.fillRect(o.x, o.y,   3, o.h);
+      }
     } else if (o.type === 'vulture') {
       drawVulture(o);
     } else if (o.type === 'platform') {
