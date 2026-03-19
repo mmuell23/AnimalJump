@@ -125,6 +125,7 @@ let boxDiamondBudget = 0;  // diamonds left to place on box clusters this level
 let lastSpawnType    = ''; // prevents two enemies in a row
 let potions          = [];
 let potionSpawned    = false;
+let highDiaCD        = 0;   // timer for float-only high diamonds
 let hearts           = [];
 let heartSpawned     = false; // max 1 heart per 2-level pair
 let popups      = []; // floating score texts
@@ -440,6 +441,7 @@ function initLevel() {
   lastSpawnType     = '';
   potions           = [];
   potionSpawned     = false;
+  highDiaCD         = 200 + Math.floor(Math.random() * 100);
   popups            = [];
   players = [ makePlayer(PLAYER_X, selAnimal) ];
   if (twoPlayer) players.push(makePlayer(PLAYER_X2, selAnimal2));
@@ -561,6 +563,19 @@ function update() {
   const clearZoneFrames  = Math.ceil(350 / cfg.speed);
   spawnCD--;
   if (spawnCD <= 0 && frame < flagSpawnFrame - clearZoneFrames) spawnNext(cfg);
+
+  // High diamonds — only reachable in float mode (y ≈ 60–130, above max jump height)
+  highDiaCD--;
+  if (highDiaCD <= 0 && frame < flagSpawnFrame - clearZoneFrames) {
+    const count   = 2 + Math.floor(Math.random() * 4);       // 2–5 diamonds
+    const baseY   = 60 + Math.floor(Math.random() * 70);     // well above jump reach
+    const spacing = 55 + Math.floor(Math.random() * 40);
+    for (let i = 0; i < count; i++) {
+      const jitter = Math.floor(Math.random() * 30) - 15;
+      diamonds.push({ x: W + 30 + i * spacing, y: baseY + jitter, color: '#FFD700', pts: 20 });
+    }
+    highDiaCD = 260 + Math.floor(Math.random() * 140);       // every 260–400 frames
+  }
 
   if (frame === flagSpawnFrame) {
     obstacles.push({ x: W + 20, type: 'flag' });
@@ -1104,10 +1119,23 @@ function drawHearts() {
 // ── Diamonds ──────────────────────────────────────────────────────────────────
 function drawDiamonds() {
   for (const d of diamonds) {
-    const s = 9; // half-size of diamond
+    const high = d.pts >= 250;
+    const s = high ? 13 : 9;
     ctx.save();
     ctx.translate(d.x, d.y);
-    // Main gem body (color from data: blue for normal, red for tier-2)
+
+    // Pulsing glow for float-only diamonds
+    if (high) {
+      const pulse = 0.18 + 0.12 * Math.sin(frame * 0.12 + d.x * 0.05);
+      ctx.globalAlpha = pulse;
+      ctx.fillStyle = '#FFD700';
+      ctx.beginPath();
+      ctx.arc(0, 0, s * 2.2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
+    // Main gem body
     ctx.fillStyle = d.color;
     ctx.beginPath();
     ctx.moveTo(0, -s);
@@ -1116,7 +1144,7 @@ function drawDiamonds() {
     ctx.lineTo(-s, 0);
     ctx.closePath();
     ctx.fill();
-    // Inner highlight (top-left facet)
+    // Inner highlight
     ctx.fillStyle = 'rgba(255,255,255,0.55)';
     ctx.beginPath();
     ctx.moveTo(0, -s);
@@ -1126,8 +1154,8 @@ function drawDiamonds() {
     ctx.closePath();
     ctx.fill();
     // Outline
-    ctx.strokeStyle = d.pts > 10 ? 'rgba(200,0,60,0.8)' : 'rgba(0,160,220,0.8)';
-    ctx.lineWidth = 1;
+    ctx.strokeStyle = high ? 'rgba(200,150,0,0.9)' : d.pts > 10 ? 'rgba(200,0,60,0.8)' : 'rgba(0,160,220,0.8)';
+    ctx.lineWidth = high ? 1.5 : 1;
     ctx.beginPath();
     ctx.moveTo(0, -s);
     ctx.lineTo(s, 0);
@@ -1135,6 +1163,15 @@ function drawDiamonds() {
     ctx.lineTo(-s, 0);
     ctx.closePath();
     ctx.stroke();
+
+    // "+20" label beneath high diamonds
+    if (high) {
+      ctx.fillStyle = 'rgba(255,220,80,0.85)';
+      ctx.font = 'bold 9px Arial';
+      ctx.textAlign = 'center';
+      ctx.fillText('+20', 0, s + 10);
+    }
+
     ctx.restore();
   }
 }
