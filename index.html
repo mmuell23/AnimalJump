@@ -103,6 +103,22 @@ const LEVEL_CFG = [
     ditchWMin: 80, ditchWMax: 238 },
 ];
 
+// ── Diamond type registry ──────────────────────────────────────────────────────
+const DIAMOND = {
+  box:   { color: '#38c8ff', pts: 10  },
+  tier1: { color: '#38c8ff', pts: 10  },
+  tier2: { color: '#ff2244', pts: 30  },
+  tier3: { color: '#cc44ff', pts: 50  },
+  high:  { color: '#FFD700', pts: 20 },
+};
+
+// ── Platform tier config — drives spawnPlatform() loop ────────────────────────
+// Each entry: one higher platform level; spawnChance = prob given previous tier exists
+const PLATFORM_TIERS = [
+  { y: PLATFORM_Y2, minN: 1, maxN: 3, spawnChance: 0.45, diaChance: 0.5, diamond: 'tier2' },
+  { y: PLATFORM_Y3, minN: 1, maxN: 2, spawnChance: 0.60, diaChance: 1.0, diamond: 'tier3' },
+];
+
 // ── State ─────────────────────────────────────────────────────────────────────
 let gs          = 'select'; // 'select'|'select2'|'playing'|'levelend'|'gameover'|'win'
 let selAnimal   = 0;
@@ -112,7 +128,6 @@ let level       = 1;
 let lives       = 3;
 let score       = 0;
 let frame       = 0;
-let spawnCD     = 160; // unified spawn stream cooldown
 let gScroll     = 0;
 let hillOff     = 0;
 let flashFrames = 0;
@@ -121,13 +136,17 @@ let players     = [];
 let obstacles   = [];
 let ditches     = [];
 let diamonds    = [];
-let platformCount = 0;     // increments each spawn; every 2nd gets diamonds
-let boxDiamondBudget = 0;  // diamonds left to place on box clusters this level
-let lastSpawnType    = ''; // prevents two enemies in a row
-let potions          = [];
-let potionSpawned    = false;
-let highDiaCD        = 0;   // timer for float-only high diamonds
-let hearts           = [];
+let potions     = [];
+let hearts      = [];
+// Spawn state consolidated into one object (reset in initLevel)
+let spawner = {
+  cd: 160,          // unified spawn-stream cooldown (frames)
+  lastType: '',     // prevents two enemies in a row
+  platformCount: 0, // increments each platform spawn; every 2nd gets tier-1 diamonds
+  diamondBudget: 0, // ground/box diamonds left for this level
+  potionSpawned: false,
+  highDiaCD: 0,     // countdown until next high-diamond cluster
+};
 let heartSpawned     = false; // max 1 heart per 2-level pair
 let popups      = []; // floating score texts
 let clouds      = [
@@ -444,23 +463,25 @@ function startGame() {
 
 function initLevel() {
   frame       = 0;
-  spawnCD     = 160;
   gScroll     = 0;
   hillOff     = 0;
   flashFrames = 0;
   greenFrames = 0;
-  obstacles         = [];
-  ditches           = [];
-  diamonds          = [];
-  hearts            = [];
-  platformCount     = 0;
+  obstacles = [];
+  ditches   = [];
+  diamonds  = [];
+  hearts    = [];
+  potions   = [];
+  popups    = [];
   if (level % 2 === 1) heartSpawned = false;
-  boxDiamondBudget  = 10 + Math.floor(Math.random() * 11);
-  lastSpawnType     = '';
-  potions           = [];
-  potionSpawned     = false;
-  highDiaCD         = 200 + Math.floor(Math.random() * 100);
-  popups            = [];
+  spawner = {
+    cd: 160,
+    lastType: '',
+    platformCount: 0,
+    diamondBudget: 10 + Math.floor(Math.random() * 11),
+    potionSpawned: false,
+    highDiaCD: 200 + Math.floor(Math.random() * 100),
+  };
   players = [ makePlayer(PLAYER_X, selAnimal) ];
   if (twoPlayer) players.push(makePlayer(PLAYER_X2, selAnimal2));
   for (const c of clouds) c.x = [90, 330, 570, 730][clouds.indexOf(c)];
@@ -488,26 +509,35 @@ function update() {
     if (gs !== 'playing') return;
   }
 
+  updateWorld(cfg);
+  updateCollectibles(cfg);
+  updateEnemies();
+  updateSpawner(cfg);
+  updateCollisions();
+
+  if (frame >= LEVEL_FRAMES) gs = 'levelend';
+}
+
+function updateWorld(cfg) {
   // Clouds
   for (const c of clouds) {
     c.x -= cfg.speed * 0.25;
     if (c.x + c.r * 2.5 < 0) c.x = W + c.r * 2;
   }
-
   // Timers
   if (flashFrames > 0) flashFrames--;
   if (greenFrames > 0) greenFrames--;
-
-  // Update floating popups
+  // Floating popups
   for (const pp of popups) { pp.y -= 1.5; pp.life--; }
   popups = popups.filter(pp => pp.life > 0);
-
-  // Move & cull
+  // Move & cull obstacles/ditches
   for (const o of obstacles) o.x -= cfg.speed;
   obstacles = obstacles.filter(o => o.x > -200);
   for (const d of ditches) d.x -= cfg.speed;
   ditches = ditches.filter(d => d.x + d.w > -10);
+}
 
+function updateCollectibles(cfg) {
   for (const h of hearts) h.x -= cfg.speed;
   hearts = hearts.filter(h => {
     if (h.x < -20) return false;
@@ -553,8 +583,9 @@ function update() {
     }
     return true;
   });
+}
 
-  // Update vulture vertical oscillation
+function updateEnemies() {
   for (const o of obstacles) {
     if (o.type !== 'vulture') continue;
     switch (o.state) {
@@ -574,25 +605,29 @@ function update() {
         break;
     }
   }
+}
 
-  // Unified spawn stream — stop well before the flag arrives for a clean finish
+function updateSpawner(cfg) {
   const flagTravelFrames = Math.ceil((W + 20 - PLAYER_X) / cfg.speed);
   const flagSpawnFrame   = LEVEL_FRAMES - 15 - flagTravelFrames;
   const clearZoneFrames  = Math.ceil(350 / cfg.speed);
-  spawnCD--;
-  if (spawnCD <= 0 && frame < flagSpawnFrame - clearZoneFrames) spawnNext(cfg);
+
+  // Main spawn stream
+  spawner.cd--;
+  if (spawner.cd <= 0 && frame < flagSpawnFrame - clearZoneFrames) spawnNext(cfg);
 
   // High diamonds — only reachable in float mode (y ≈ 60–130, above max jump height)
-  highDiaCD--;
-  if (highDiaCD <= 0 && frame < flagSpawnFrame - clearZoneFrames) {
-    const count   = 2 + Math.floor(Math.random() * 4);       // 2–5 diamonds
-    const baseY   = 60 + Math.floor(Math.random() * 70);     // well above jump reach
+  spawner.highDiaCD--;
+  if (spawner.highDiaCD <= 0 && frame < flagSpawnFrame - clearZoneFrames) {
+    const count   = 2 + Math.floor(Math.random() * 4);
+    const baseY   = 60 + Math.floor(Math.random() * 70);
     const spacing = 55 + Math.floor(Math.random() * 40);
     for (let i = 0; i < count; i++) {
       const jitter = Math.floor(Math.random() * 30) - 15;
-      diamonds.push({ x: W + 30 + i * spacing, y: baseY + jitter, color: '#FFD700', pts: 20 });
+      diamonds.push({ x: W + 30 + i * spacing, y: baseY + jitter,
+                      color: DIAMOND.high.color, pts: DIAMOND.high.pts });
     }
-    highDiaCD = 260 + Math.floor(Math.random() * 140);       // every 260–400 frames
+    spawner.highDiaCD = 260 + Math.floor(Math.random() * 140);
   }
 
   if (frame === flagSpawnFrame) {
@@ -600,8 +635,9 @@ function update() {
     obstacles = obstacles.filter(o => o.type === 'flag' || o.x < W);
     ditches   = ditches.filter(d => d.x + d.w < W);
   }
+}
 
-  // Collision for each player
+function updateCollisions() {
   for (const p of players) {
     if (p.invFrames === 0) {
       for (const o of obstacles) {
@@ -618,8 +654,6 @@ function update() {
       }
     }
   }
-
-  if (frame >= LEVEL_FRAMES) gs = 'levelend';
 }
 
 function updatePlayer(p, cfg) {
@@ -718,7 +752,7 @@ function spawnNext(cfg) {
   const enemyTotal  = cfg.lionRatio * (1 - ditchProb);
   const lionProb    = enemyTotal * 0.6;
   const vultureProb = enemyTotal * 0.4;
-  const noEnemy     = lastSpawnType === 'lion' || lastSpawnType === 'vulture';
+  const noEnemy     = spawner.lastType === 'lion' || spawner.lastType === 'vulture';
   let spawnedWidth;
   let enemySpawned = false;
 
@@ -727,23 +761,23 @@ function spawnNext(cfg) {
     const w = cfg.ditchWMin + Math.random() * (cfg.ditchWMax - cfg.ditchWMin);
     ditches.push({ x: W + 20, w });
     spawnedWidth = w;
-    lastSpawnType = 'ditch';
+    spawner.lastType = 'ditch';
 
   } else if (roll < ditchProb + lionProb && !noEnemy) {
     // Lion
     obstacles.push({ x: W + 20, y: GROUND_Y - 62, w: 58, h: 62, type: 'lion' });
     spawnedWidth = 58;
     enemySpawned = true;
-    lastSpawnType = 'lion';
+    spawner.lastType = 'lion';
 
   } else if (roll < ditchProb + lionProb + vultureProb && !noEnemy) {
     // Vulture — oscillates vertically; starts randomly at bottom or top
     const vw = 68, vh = 44;
     const vYLow  = GROUND_Y - vh;
     const vYHigh = GROUND_Y - 195;
-    const startTop     = Math.random() < 0.5;
-    const waitBot = 60 + Math.floor(Math.random() * 60);
-    const waitTop = 50 + Math.floor(Math.random() * 50);
+    const startTop = Math.random() < 0.5;
+    const waitBot  = 60 + Math.floor(Math.random() * 60);
+    const waitTop  = 50 + Math.floor(Math.random() * 50);
     obstacles.push({
       x: W + 20,
       y: startTop ? vYHigh : vYLow,
@@ -755,35 +789,36 @@ function spawnNext(cfg) {
     });
     spawnedWidth = vw;
     enemySpawned = true;
-    lastSpawnType = 'vulture';
+    spawner.lastType = 'vulture';
 
   } else if (Math.random() < (twoPlayer ? 0.52 : 0.35)) {
     // Floating platform with stepping-stone boxes
     const n = Math.max(2, Math.floor(Math.random() * 5) + 2);
     spawnedWidth = spawnPlatform(n);
-    lastSpawnType = 'platform';
+    spawner.lastType = 'platform';
 
   } else {
     // Box cluster (1–8)
     const n = clusterSize();
     spawnCluster(n);
     spawnedWidth = n * BOX_W;
-    lastSpawnType = 'box';
+    spawner.lastType = 'box';
   }
 
   // Enemies need a large gap so stomp-bounce can't chain into the next obstacle
   const gapMin = enemySpawned ? Math.max(cfg.gapLo, 340) : cfg.gapLo;
   const gapPx  = gapMin + Math.random() * (cfg.gapHi - gapMin);
-  spawnCD = Math.round((spawnedWidth + gapPx) / cfg.speed);
+  spawner.cd = Math.round((spawnedWidth + gapPx) / cfg.speed);
 
   // Occasionally scatter ground-level diamonds in the gap (clear of any obstacle)
-  if (boxDiamondBudget > 0 && lastSpawnType !== 'ditch' && Math.random() < 0.45) {
+  if (spawner.diamondBudget > 0 && spawner.lastType !== 'ditch' && Math.random() < 0.45) {
     const count    = 1 + Math.floor(Math.random() * 3);
     const gapStart = W + 20 + (spawnedWidth || 0) + 50;
     const spacing  = 44 + Math.floor(Math.random() * 36);
-    for (let i = 0; i < count && boxDiamondBudget > 0; i++) {
-      diamonds.push({ x: gapStart + i * spacing, y: GROUND_Y - 20, color: '#38c8ff', pts: 10 });
-      boxDiamondBudget--;
+    for (let i = 0; i < count && spawner.diamondBudget > 0; i++) {
+      diamonds.push({ x: gapStart + i * spacing, y: GROUND_Y - 20,
+                      color: DIAMOND.box.color, pts: DIAMOND.box.pts });
+      spawner.diamondBudget--;
     }
   }
 }
@@ -839,35 +874,36 @@ function spawnCluster(n) {
   }
 
   // Spawn potion only on single-height columns (no box stacked on top)
-  if (!potionSpawned && Math.random() < 0.2) {
+  if (!spawner.potionSpawned && Math.random() < 0.2) {
     const singleCols = [...colTop.entries()].filter(([, topY]) => topY === GROUND_Y - BOX_H);
     if (singleCols.length > 0) {
       const [bx] = singleCols[Math.floor(Math.random() * singleCols.length)];
       potions.push({ x: bx + BOX_W / 2, y: GROUND_Y - BOX_H - 22 });
-      potionSpawned = true;
+      spawner.potionSpawned = true;
     }
   }
 
   // Place 1–2 diamonds on randomly chosen columns, always at the column's topmost box.
   // 30% of diamonds float 40–100 px above the box (still reachable by jumping).
-  if (boxDiamondBudget > 0 && Math.random() < 0.55) {
-    const cols    = [...colTop.entries()];          // [[bx, topY], …]
-    const count   = Math.min(boxDiamondBudget, n >= 4 ? 2 : 1);
+  if (spawner.diamondBudget > 0 && Math.random() < 0.55) {
+    const cols     = [...colTop.entries()];
+    const count    = Math.min(spawner.diamondBudget, n >= 4 ? 2 : 1);
     const shuffled = cols.sort(() => Math.random() - 0.5).slice(0, count);
     for (const [bx, topY] of shuffled) {
       const floatExtra = Math.random() < 0.3 ? 40 + Math.random() * 60 : 0;
-      diamonds.push({ x: bx + BOX_W / 2, y: topY - 14 - floatExtra, color: '#38c8ff', pts: 10 });
-      boxDiamondBudget--;
+      diamonds.push({ x: bx + BOX_W / 2, y: topY - 14 - floatExtra,
+                      color: DIAMOND.box.color, pts: DIAMOND.box.pts });
+      spawner.diamondBudget--;
     }
   }
 }
 
-// Returns total spawned width (step + gap + platform) for spawnCD calculation.
+// Returns total spawned width (step + gap + platform + upper tiers) for spawner.cd calc.
 function spawnPlatform(n) {
-  const x0 = W + 20;
-  const stepW = 2;                              // always 2 boxes wide (landable)
-  const stepH = Math.random() < 0.5 ? 1 : 2;   // 1 or 2 boxes high
-  const gap   = BOX_W;                          // 1-box gap between step and platform
+  const x0    = W + 20;
+  const stepW = 2;                            // always 2 boxes wide (landable)
+  const stepH = Math.random() < 0.5 ? 1 : 2; // 1 or 2 boxes high
+  const gap   = BOX_W;                        // 1-box gap between step and platform
 
   // Stepping-stone boxes (normal brown boxes)
   for (let row = 0; row < stepH; row++) {
@@ -877,17 +913,18 @@ function spawnPlatform(n) {
     }
   }
 
-  // Floating platform cells starting after step + gap
+  // Tier-1 floating platform
   const platX = x0 + stepW * BOX_W + gap;
   for (let i = 0; i < n; i++) {
     obstacles.push({ x: platX + i * BOX_W, y: PLATFORM_Y, w: BOX_W, h: BOX_H, type: 'platform' });
   }
 
-  // Every 2nd platform gets diamonds floating just above it
-  platformCount++;
-  if (platformCount % 2 === 0) {
+  // Every 2nd platform gets tier-1 diamonds just above
+  spawner.platformCount++;
+  if (spawner.platformCount % 2 === 0) {
     for (let i = 0; i < n; i++) {
-      diamonds.push({ x: platX + i * BOX_W + BOX_W / 2, y: PLATFORM_Y - 16, color: '#38c8ff', pts: 10 });
+      diamonds.push({ x: platX + i * BOX_W + BOX_W / 2, y: PLATFORM_Y - 16,
+                      color: DIAMOND.tier1.color, pts: DIAMOND.tier1.pts });
     }
   }
 
@@ -898,39 +935,31 @@ function spawnPlatform(n) {
     heartSpawned = true;
   }
 
-  // 45% chance: add a second, higher platform reachable from this one
-  let tier2Width = 0;
-  let tier3Width = 0;
-  let plat2X = 0, n2 = 0;
-  if (Math.random() < 0.45) {
-    n2           = 1 + Math.floor(Math.random() * 3);
-    const gap2   = BOX_W + Math.floor(Math.random() * 2) * BOX_W;
-    plat2X       = platX + n * BOX_W + gap2;
-    for (let i = 0; i < n2; i++) {
-      obstacles.push({ x: plat2X + i * BOX_W, y: PLATFORM_Y2, w: BOX_W, h: BOX_H, type: 'platform' });
-    }
-    if (Math.random() < 0.5) {
-      const ri = Math.floor(Math.random() * n2);
-      diamonds.push({ x: plat2X + ri * BOX_W + BOX_W / 2, y: PLATFORM_Y2 - 16, color: '#ff2244', pts: 30 });
-    }
-    tier2Width = gap2 + n2 * BOX_W;
+  // Higher tiers — driven by PLATFORM_TIERS config
+  let totalExtraWidth = 0;
+  let prevX = platX;
+  let prevN = n;
 
-    // 30% chance: add a third, even higher platform reachable from tier 2
-    if (Math.random() < 0.60) {
-      const n3     = 1 + Math.floor(Math.random() * 2);
-      const gap3   = BOX_W + Math.floor(Math.random() * 2) * BOX_W;
-      const plat3X = plat2X + n2 * BOX_W + gap3;
-      for (let i = 0; i < n3; i++) {
-        obstacles.push({ x: plat3X + i * BOX_W, y: PLATFORM_Y3, w: BOX_W, h: BOX_H, type: 'platform' });
-      }
-      // Purple diamond (+50) on tier 3
-      const ri = Math.floor(Math.random() * n3);
-      diamonds.push({ x: plat3X + ri * BOX_W + BOX_W / 2, y: PLATFORM_Y3 - 16, color: '#cc44ff', pts: 50 });
-      tier3Width = gap3 + n3 * BOX_W;
+  for (const tier of PLATFORM_TIERS) {
+    if (Math.random() >= tier.spawnChance) break;
+    const tn   = tier.minN + Math.floor(Math.random() * (tier.maxN - tier.minN + 1));
+    const tgap = BOX_W + Math.floor(Math.random() * 2) * BOX_W;
+    const tx   = prevX + prevN * BOX_W + tgap;
+    for (let i = 0; i < tn; i++) {
+      obstacles.push({ x: tx + i * BOX_W, y: tier.y, w: BOX_W, h: BOX_H, type: 'platform' });
     }
+    if (Math.random() < tier.diaChance) {
+      const ri  = Math.floor(Math.random() * tn);
+      const def = DIAMOND[tier.diamond];
+      diamonds.push({ x: tx + ri * BOX_W + BOX_W / 2, y: tier.y - 16,
+                      color: def.color, pts: def.pts });
+    }
+    totalExtraWidth += tgap + tn * BOX_W;
+    prevX = tx;
+    prevN = tn;
   }
 
-  return stepW * BOX_W + gap + n * BOX_W + tier2Width + tier3Width;
+  return stepW * BOX_W + gap + n * BOX_W + totalExtraWidth;
 }
 
 function overlaps(p, o) {
@@ -1175,7 +1204,7 @@ function drawHearts() {
 // ── Diamonds ──────────────────────────────────────────────────────────────────
 function drawDiamonds() {
   for (const d of diamonds) {
-    const high = d.pts >= 250;
+    const high = d.pts >= DIAMOND.high.pts;
     const s = high ? 13 : 9;
     ctx.save();
     ctx.translate(d.x, d.y);
@@ -1210,7 +1239,10 @@ function drawDiamonds() {
     ctx.closePath();
     ctx.fill();
     // Outline
-    ctx.strokeStyle = high ? 'rgba(200,150,0,0.9)' : d.pts === 50 ? 'rgba(160,0,220,0.9)' : d.pts > 10 ? 'rgba(200,0,60,0.8)' : 'rgba(0,160,220,0.8)';
+    ctx.strokeStyle = high                         ? 'rgba(200,150,0,0.9)'
+                    : d.pts === DIAMOND.tier3.pts  ? 'rgba(160,0,220,0.9)'
+                    : d.pts === DIAMOND.tier2.pts  ? 'rgba(200,0,60,0.8)'
+                    :                                'rgba(0,160,220,0.8)';
     ctx.lineWidth = high ? 1.5 : 1;
     ctx.beginPath();
     ctx.moveTo(0, -s);
@@ -1220,12 +1252,12 @@ function drawDiamonds() {
     ctx.closePath();
     ctx.stroke();
 
-    // "+20" label beneath high diamonds
+    // Point label beneath high diamonds
     if (high) {
       ctx.fillStyle = 'rgba(255,220,80,0.85)';
       ctx.font = 'bold 9px Arial';
       ctx.textAlign = 'center';
-      ctx.fillText('+20', 0, s + 10);
+      ctx.fillText(`+${DIAMOND.high.pts}`, 0, s + 10);
     }
 
     ctx.restore();
