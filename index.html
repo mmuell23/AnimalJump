@@ -1140,21 +1140,23 @@ function spawnCluster(n) {
     }
   });
 
-  // Mark ~1 in 10 topmost boxes as trampolines (pink, super-jump on landing)
-  for (const obj of colTopRef.values()) {
-    if (Math.random() < 0.10) obj.trampoline = true;
+  // Mark ~1 in 10 topmost boxes as trampolines — level 2+
+  if (level >= 2) {
+    for (const obj of colTopRef.values()) {
+      if (Math.random() < 0.10) obj.trampoline = true;
+    }
   }
 
-  // Spawn potion only on single-height columns (no box stacked on top)
+  // Spawn potion only on single-height columns (no box stacked on top) — level 1+
   const singleCols = [...colTop.entries()].filter(([, topY]) => topY === GROUND_Y - BOX_H);
   if (!spawner.potionSpawned && Math.random() < 0.2 && singleCols.length > 0) {
     const [bx] = singleCols[Math.floor(Math.random() * singleCols.length)];
     potions.push({ x: bx + BOX_W / 2, y: GROUND_Y - BOX_H - 22 });
     spawner.potionSpawned = true;
   }
-  // Spawn rocket on any topmost column (~10% chance, max 1 solo / 2 two-player)
+  // Spawn rocket on any topmost column (~10% chance, max 1 solo / 2 two-player) — level 2+
   const rocketMax = twoPlayer ? 2 : 1;
-  if (spawner.rocketCount < rocketMax && Math.random() < 0.10) {
+  if (level >= 2 && spawner.rocketCount < rocketMax && Math.random() < 0.10) {
     const allCols = [...colTop.entries()];
     if (allCols.length > 0) {
       const [bx, topY] = allCols[Math.floor(Math.random() * allCols.length)];
@@ -2269,30 +2271,30 @@ function drawPlayers() {
     if (p.animalIdx === 2 && p.scratchCooldown > 0) {
       const barW = 36, ratio = 1 - p.scratchCooldown / 180;
       ctx.fillStyle = 'rgba(0,0,0,0.35)';
-      ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 10, barW, 5);
+      ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 18, barW, 5);
       ctx.fillStyle = '#ff44aa';
-      ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 10, barW * ratio, 5);
+      ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 18, barW * ratio, 5);
     }
     if (p.animalIdx === 1 && p.barkCooldown > 0) {
       const barW = 36, ratio = 1 - p.barkCooldown / 300;
       ctx.fillStyle = 'rgba(0,0,0,0.35)';
-      ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 10, barW, 5);
+      ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 18, barW, 5);
       ctx.fillStyle = `hsl(${50 + 70 * ratio},100%,55%)`;
-      ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 10, barW * ratio, 5);
+      ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 18, barW * ratio, 5);
     }
     if (p.animalIdx === 4 && p.wolfCooldown > 0) {
       const barW = 36, ratio = 1 - p.wolfCooldown / 480;
       ctx.fillStyle = 'rgba(0,0,0,0.35)';
-      ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 10, barW, 5);
+      ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 18, barW, 5);
       ctx.fillStyle = `hsl(${220 + 60 * ratio},80%,65%)`;
-      ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 10, barW * ratio, 5);
+      ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 18, barW * ratio, 5);
     }
     if (p.animalIdx === 3 && p.donkeyBoxCD > 0) {
       const barW = 36, ratio = 1 - p.donkeyBoxCD / 300;
       ctx.fillStyle = 'rgba(0,0,0,0.35)';
-      ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 10, barW, 5);
+      ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 18, barW, 5);
       ctx.fillStyle = `hsl(${30 + 60 * ratio},90%,55%)`;
-      ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 10, barW * ratio, 5);
+      ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 18, barW * ratio, 5);
     }
     drawAnimalSprite(p.x, p.y, p.animalIdx, p.runT, p.onGround);
     if (twoPlayer) {
