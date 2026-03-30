@@ -11,18 +11,14 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      min-height: 100vh;
-      min-height: 100dvh;
-      padding: env(safe-area-inset-top)  env(safe-area-inset-right)
-               env(safe-area-inset-bottom) env(safe-area-inset-left);
+      width: 100vw;
+      height: 100vh;
+      height: 100dvh;
       user-select: none;
       overflow: hidden;
     }
     canvas {
       display: block;
-      max-width:  calc(100vw  - env(safe-area-inset-left) - env(safe-area-inset-right));
-      max-height: calc(100vh  - env(safe-area-inset-top)  - env(safe-area-inset-bottom));
-      max-height: calc(100dvh - env(safe-area-inset-top)  - env(safe-area-inset-bottom));
       border-radius: 16px;
       box-shadow: 0 0 60px rgba(255, 160, 50, 0.3);
     }
@@ -37,6 +33,17 @@ const canvas = document.getElementById('c');
 const ctx    = canvas.getContext('2d');
 const W = canvas.width  = 960;
 const H = canvas.height = 540;
+
+// Fit canvas to the actual visible viewport (accounts for iOS Safari browser chrome)
+function fitCanvas() {
+  const vw = window.visualViewport ? window.visualViewport.width  : window.innerWidth;
+  const vh = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+  const scale = Math.min(vw / W, vh / H);
+  canvas.style.width  = Math.round(W * scale) + 'px';
+  canvas.style.height = Math.round(H * scale) + 'px';
+}
+(window.visualViewport ?? window).addEventListener('resize', fitCanvas);
+fitCanvas();
 
 const GROUND_Y    = H - 80;
 const PLAYER_X    = 130;
