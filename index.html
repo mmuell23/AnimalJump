@@ -572,11 +572,13 @@ function handleUIClick(mx, my) {
         selAnimal = i; return;
       }
     }
-    const p2cards = getCardRects(SEL_P2_Y);
-    for (let i = 0; i < 5; i++) {
-      const c = p2cards[i];
-      if (mx >= c.x && mx <= c.x + c.w && my >= c.y && my <= c.y + c.h) {
-        selAnimal2 = i; return;
+    if (!isMobile) {
+      const p2cards = getCardRects(SEL_P2_Y);
+      for (let i = 0; i < 5; i++) {
+        const c = p2cards[i];
+        if (mx >= c.x && mx <= c.x + c.w && my >= c.y && my <= c.y + c.h) {
+          selAnimal2 = i; return;
+        }
       }
     }
     if (isMobile) {
@@ -3058,34 +3060,45 @@ function drawSelect() {
 
   // ── Controls panel ─────────────────────────────────────────────────────────
   const ctrlY = SEL_BTN_Y + 60;
-  const colW  = 210;
-  const col1  = W / 2 - colW - 16;
-  const col2  = W / 2 + 16;
 
-  ctx.fillStyle = 'rgba(0,0,0,0.35)';
-  rrect(col1 - 12, ctrlY - 6, colW * 2 + 56, 88, 10); ctx.fill();
+  if (isMobile) {
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    rrect(W / 2 - 220, ctrlY - 6, 440, 70, 10); ctx.fill();
+    const mrows = ['◀ ▶  Laufen', '▲  Springen (halten = höher)', '★  Sonderfähigkeit'];
+    ctx.font      = '13px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = 'rgba(255,255,255,0.80)';
+    mrows.forEach((row, i) => ctx.fillText(row, W / 2, ctrlY + 18 + i * 18));
+  } else {
+    const colW = 210;
+    const col1 = W / 2 - colW - 16;
+    const col2 = W / 2 + 16;
 
-  ctx.font      = 'bold 12px Arial';
-  ctx.textAlign = 'left';
-  ctx.fillStyle = '#80ddff';
-  ctx.fillText('Spieler 1', col1, ctrlY + 11);
-  ctx.fillStyle = '#ffdd80';
-  ctx.fillText('Spieler 2', col2, ctrlY + 11);
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    rrect(col1 - 12, ctrlY - 6, colW * 2 + 56, 88, 10); ctx.fill();
 
-  ctx.fillStyle = 'rgba(255,255,255,0.15)';
-  ctx.fillRect(W / 2 - 1, ctrlY, 2, 78);
+    ctx.font      = 'bold 12px Arial';
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#80ddff';
+    ctx.fillText('Spieler 1', col1, ctrlY + 11);
+    ctx.fillStyle = '#ffdd80';
+    ctx.fillText('Spieler 2', col2, ctrlY + 11);
 
-  const rows = [
-    ['↑  Springen',           'W  Springen'],
-    ['← →  Laufen',          'A D  Laufen'],
-    ['↑ ↓  Schweben (Trank)', 'W S  Schweben (Trank)'],
-  ];
-  ctx.font      = '11px Arial';
-  ctx.fillStyle = 'rgba(255,255,255,0.75)';
-  rows.forEach((row, i) => {
-    ctx.fillText(row[0], col1, ctrlY + 26 + i * 17);
-    ctx.fillText(row[1], col2, ctrlY + 26 + i * 17);
-  });
+    ctx.fillStyle = 'rgba(255,255,255,0.15)';
+    ctx.fillRect(W / 2 - 1, ctrlY, 2, 78);
+
+    const rows = [
+      ['↑  Springen',           'W  Springen'],
+      ['← →  Laufen',          'A D  Laufen'],
+      ['↑ ↓  Schweben (Trank)', 'W S  Schweben (Trank)'],
+    ];
+    ctx.font      = '11px Arial';
+    ctx.fillStyle = 'rgba(255,255,255,0.75)';
+    rows.forEach((row, i) => {
+      ctx.fillText(row[0], col1, ctrlY + 26 + i * 17);
+      ctx.fillText(row[1], col2, ctrlY + 26 + i * 17);
+    });
+  }
 
   ctx.textAlign = 'center';
   ctx.fillStyle = 'rgba(255,255,255,0.30)';
