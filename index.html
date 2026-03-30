@@ -114,10 +114,14 @@ const LEVEL_CFG = [
     sky1: '#b03000', sky2: '#ff6a1a', ground: '#6B3A1A',
     sunColor: '#FF4500', sunGlow: 'rgba(255,80,0,',
     ditchWMin: 75, ditchWMax: 196 },
-  { speed: 8.0, lionRatio: 0.62, gapLo:  75, gapHi: 160,
+  { speed: 7.0, lionRatio: 0.50, gapLo:  88, gapHi: 175,
     sky1: '#5c0000', sky2: '#bb1800', ground: '#3a1000',
     sunColor: '#ff2200', sunGlow: 'rgba(255,40,0,',
     ditchWMin: 80, ditchWMax: 238 },
+  { speed: 7.0, lionRatio: 0.62, gapLo:  80, gapHi: 160,
+    sky1: '#070714', sky2: '#111128', ground: '#1a1a2a',
+    sunColor: '#d0d0f0', sunGlow: 'rgba(200,200,255,',
+    ditchWMin: 80, ditchWMax: 200 },
 ];
 
 // ── Diamond type registry ──────────────────────────────────────────────────────
@@ -160,6 +164,10 @@ let hearts        = [];
 let particles     = []; // explosion sparks
 let shadowWolves  = []; // wolf ability
 let yarnBalls     = []; // cat ability
+let clocks        = []; // level 1 speed-boost collectible
+let hourglasses   = []; // level 5 slow-time collectible
+let clockFrames     = 0; // frames remaining for 1.5× speed boost
+let hourglassFrames = 0; // frames remaining for ½ speed slow
 // Spawn state consolidated into one object (reset in initLevel)
 let spawner = {
   cd: 160,          // unified spawn-stream cooldown (frames)
@@ -179,6 +187,51 @@ let clouds      = [
   { x: 730, y: 38,  r: 34 },
 ];
 const keys = {}; // live key state for float mode
+
+// ── Mobile detection & virtual button layout ──────────────────────────────────
+const isMobile = navigator.maxTouchPoints > 0 || 'ontouchstart' in window;
+
+// Button layout (canvas coords). Positioned just above the progress bar.
+const MB = (() => {
+  const W2 = 960, bw = 90, bh = 68, gap = 12, bot = W2 * 540 / 960; // dummy; real values below
+  const by = 540 - 28 - 68; // top-y of all buttons = 444
+  return {
+    left:    { x: 12,              y: by, w: 90, h: 68 },
+    right:   { x: 12 + 90 + 12,   y: by, w: 90, h: 68 },
+    special: { x: 960 - 12 - 90 - 12 - 90, y: by, w: 90, h: 68 },
+    jump:    { x: 960 - 12 - 90,  y: by, w: 90, h: 68 },
+  };
+})();
+
+// Map touch.identifier → button name currently held by that finger
+const activeTouches = new Map();
+
+function getTouchedBtn(cx, cy) {
+  for (const [name, b] of Object.entries(MB)) {
+    if (cx >= b.x && cx <= b.x + b.w && cy >= b.y && cy <= b.y + b.h) return name;
+  }
+  return null;
+}
+
+function pressBtn(name) {
+  if (name === 'left')    { keys['ArrowLeft']  = true; }
+  if (name === 'right')   { keys['ArrowRight'] = true; }
+  if (name === 'special') { keys['ArrowDown']  = true; }
+  if (name === 'jump') {
+    keys['ArrowUp'] = true;
+    if (players.length > 0 && players[0].floatFrames === 0) tryJump(players[0]);
+  }
+}
+
+function releaseBtn(name) {
+  if (name === 'left')    { keys['ArrowLeft']  = false; }
+  if (name === 'right')   { keys['ArrowRight'] = false; }
+  if (name === 'special') { keys['ArrowDown']  = false; }
+  if (name === 'jump') {
+    keys['ArrowUp'] = false;
+    if (players.length > 0) releaseJump(players[0]);
+  }
+}
 
 // ── Player factory ────────────────────────────────────────────────────────────
 function makePlayer(x, animalIdx) {
@@ -424,6 +477,15 @@ document.addEventListener('keydown', e => {
     if      (gs === 'levelend')                 advanceLevel();
     else if (gs === 'gameover' || gs === 'win') gs = 'select';
   }
+  // Dev shortcut: digit 1–5 → jump to that level with 3 lives
+  const digitMatch = e.code.match(/^Digit([1-6])$/);
+  if (digitMatch) {
+    level = parseInt(digitMatch[1]);
+    lives = 3;
+    score = 0;
+    initLevel();
+    gs = 'playing';
+  }
 });
 document.addEventListener('keyup', e => {
   keys[e.code] = false;
@@ -443,20 +505,61 @@ canvas.addEventListener('click', e => {
                 (e.clientY - r.top)  * H / r.height);
 });
 
-// ── Touch: touchstart begins jump, touchend releases boost and handles UI taps
+// ── Touch handlers ────────────────────────────────────────────────────────────
+function toCanvasCoords(touch) {
+  const r = canvas.getBoundingClientRect();
+  return {
+    cx: (touch.clientX - r.left) * W / r.width,
+    cy: (touch.clientY - r.top)  * H / r.height,
+  };
+}
+
 canvas.addEventListener('touchstart', e => {
   e.preventDefault();
-  if (gs === 'playing' && players.length > 0) tryJump(players[0]);
+  if (gs !== 'playing') {
+    const { cx, cy } = toCanvasCoords(e.changedTouches[0]);
+    handleUIClick(cx, cy);
+    return;
+  }
+  if (!isMobile) {
+    // Fallback for non-mobile touch (shouldn't normally happen)
+    if (players.length > 0) tryJump(players[0]);
+    return;
+  }
+  for (const t of e.changedTouches) {
+    const { cx, cy } = toCanvasCoords(t);
+    const btn = getTouchedBtn(cx, cy);
+    if (btn) { activeTouches.set(t.identifier, btn); pressBtn(btn); }
+  }
 }, { passive: false });
-canvas.addEventListener('touchend', e => {
+
+canvas.addEventListener('touchmove', e => {
   e.preventDefault();
-  if (players.length > 0) releaseJump(players[0]);
-  const r  = canvas.getBoundingClientRect();
-  const t  = e.changedTouches[0];
-  const mx = (t.clientX - r.left) * W / r.width;
-  const my = (t.clientY - r.top)  * H / r.height;
-  if (gs !== 'playing') handleUIClick(mx, my);
+  if (gs !== 'playing' || !isMobile) return;
+  for (const t of e.changedTouches) {
+    const prev = activeTouches.get(t.identifier);
+    const { cx, cy } = toCanvasCoords(t);
+    const next = getTouchedBtn(cx, cy);
+    if (prev === next) continue;
+    if (prev) releaseBtn(prev);
+    if (next) { activeTouches.set(t.identifier, next); pressBtn(next); }
+    else activeTouches.delete(t.identifier);
+  }
 }, { passive: false });
+
+function endTouches(e) {
+  e.preventDefault();
+  if (!isMobile) {
+    if (players.length > 0) releaseJump(players[0]);
+    return;
+  }
+  for (const t of e.changedTouches) {
+    const btn = activeTouches.get(t.identifier);
+    if (btn) { releaseBtn(btn); activeTouches.delete(t.identifier); }
+  }
+}
+canvas.addEventListener('touchend',    endTouches, { passive: false });
+canvas.addEventListener('touchcancel', endTouches, { passive: false });
 
 function handleUIClick(mx, my) {
   if (gs === 'levelend')                     { advanceLevel(); return; }
@@ -476,13 +579,20 @@ function handleUIClick(mx, my) {
         selAnimal2 = i; return;
       }
     }
-    const b1 = getTwoPlayerBtn();
-    if (mx >= b1.x && mx <= b1.x + b1.w && my >= b1.y && my <= b1.y + b1.h) {
-      twoPlayer = false; startGame(); return;
-    }
-    const b2 = getSoloBtn();
-    if (mx >= b2.x && mx <= b2.x + b2.w && my >= b2.y && my <= b2.y + b2.h) {
-      twoPlayer = true; startGame(); return;
+    if (isMobile) {
+      const mb = { x: W / 2 - 100, y: SEL_BTN_Y, w: 200, h: 50 };
+      if (mx >= mb.x && mx <= mb.x + mb.w && my >= mb.y && my <= mb.y + mb.h) {
+        twoPlayer = false; startGame(); return;
+      }
+    } else {
+      const b1 = getTwoPlayerBtn();
+      if (mx >= b1.x && mx <= b1.x + b1.w && my >= b1.y && my <= b1.y + b1.h) {
+        twoPlayer = false; startGame(); return;
+      }
+      const b2 = getSoloBtn();
+      if (mx >= b2.x && mx <= b2.x + b2.w && my >= b2.y && my <= b2.y + b2.h) {
+        twoPlayer = true; startGame(); return;
+      }
     }
   }
 }
@@ -519,6 +629,7 @@ function startGame() {
 }
 
 function initLevel() {
+  activeTouches.clear();
   frame       = 0;
   gScroll     = 0;
   hillOff     = 0;
@@ -534,6 +645,10 @@ function initLevel() {
   particles     = [];
   shadowWolves  = [];
   yarnBalls     = [];
+  clocks        = [];
+  hourglasses   = [];
+  clockFrames     = 0;
+  hourglassFrames = 0;
   popups     = [];
   if (level % 2 === 1) heartSpawned = false;
   spawner = {
@@ -543,6 +658,8 @@ function initLevel() {
     diamondBudget: 10 + Math.floor(Math.random() * 11),
     potionSpawned: false,
     rocketCount: 0,
+    clockSpawned: false,
+    hourglassSpawned: false,
     highDiaCD: 200 + Math.floor(Math.random() * 100),
   };
   players = [ makePlayer(PLAYER_X, selAnimal) ];
@@ -551,7 +668,7 @@ function initLevel() {
 }
 
 function advanceLevel() {
-  if (level >= 5) { gs = 'win'; return; }
+  if (level >= 6) { gs = 'win'; return; }
   level++;
   initLevel();
   gs = 'playing';
@@ -565,7 +682,12 @@ function update() {
   // Speed multiplier: 2× during rocket, eases back to 1× in the last 90 frames
   const maxRocket  = players.reduce((m, p) => Math.max(m, p.rocketFrames), 0);
   const rocketFade = maxRocket > 0 ? Math.min(1, maxRocket / 90) : 0;
-  const eff = rocketFade > 0 ? { ...cfg, speed: cfg.speed * (1 + rocketFade) } : cfg;
+  if (clockFrames     > 0) clockFrames--;
+  if (hourglassFrames > 0) hourglassFrames--;
+  let speedMult = 1 + rocketFade;
+  if (clockFrames     > 0) speedMult *= 1.5;
+  if (hourglassFrames > 0) speedMult *= 0.5;
+  const eff = speedMult !== 1 ? { ...cfg, speed: cfg.speed * speedMult } : cfg;
 
   gScroll = (gScroll + eff.speed) % 50;
   hillOff += eff.speed * 0.3;
@@ -655,6 +777,38 @@ function updateCollectibles(cfg) {
         p.floatFrames = 450;
         playPotion();
         popups.push({ x: po.x, y: po.y - 10, text: '✨ Schweben!', life: 90, color: '#80ff80' });
+        return false;
+      }
+    }
+    return true;
+  });
+
+  // Clock collectibles
+  for (const c of clocks) c.x -= cfg.speed;
+  clocks = clocks.filter(c => {
+    if (c.x < -20) return false;
+    for (const p of players) {
+      if (Math.abs(p.x - c.x) < PLAYER_SIZE / 2 + 14 &&
+          Math.abs((p.y - PLAYER_SIZE / 2) - c.y) < PLAYER_SIZE / 2 + 14) {
+        clockFrames = 600; // 10 seconds
+        playPotion();
+        popups.push({ x: c.x, y: c.y - 10, text: '⚡ 1.5× Tempo!', life: 90, color: '#ffcc00' });
+        return false;
+      }
+    }
+    return true;
+  });
+
+  // Hourglass collectibles
+  for (const h of hourglasses) h.x -= cfg.speed;
+  hourglasses = hourglasses.filter(h => {
+    if (h.x < -20) return false;
+    for (const p of players) {
+      if (Math.abs(p.x - h.x) < PLAYER_SIZE / 2 + 14 &&
+          Math.abs((p.y - PLAYER_SIZE / 2) - h.y) < PLAYER_SIZE / 2 + 14) {
+        hourglassFrames = 900; // 15 seconds
+        playPotion();
+        popups.push({ x: h.x, y: h.y - 10, text: '🐢 Zeitlupe!', life: 90, color: '#88aaff' });
         return false;
       }
     }
@@ -752,6 +906,21 @@ function updateSpawner(cfg) {
     obstacles.push({ x: W + 20, type: 'flag' });
     obstacles = obstacles.filter(o => o.type === 'flag' || o.x < W);
     ditches   = ditches.filter(d => d.x + d.w < W);
+  }
+
+  // Clock: level 1, first quarter — wait for a gap in the obstacle stream
+  if (level === 1 && !spawner.clockSpawned && frame >= 180 && frame <= LEVEL_FRAMES / 4) {
+    if (obstaclesClearAt(W + 20, 90)) {
+      clocks.push({ x: W + 20, y: GROUND_Y - 95 });
+      spawner.clockSpawned = true;
+    }
+  }
+  // Hourglass: level 5, first quarter — wait for a gap in the obstacle stream
+  if (level >= 5 && !spawner.hourglassSpawned && frame >= 180 && frame <= LEVEL_FRAMES / 4) {
+    if (obstaclesClearAt(W + 20, 90)) {
+      hourglasses.push({ x: W + 20, y: GROUND_Y - 95 });
+      spawner.hourglassSpawned = true;
+    }
   }
 }
 
@@ -868,8 +1037,7 @@ function updatePlayer(p, cfg) {
   const isP1      = p === players[0];
   const leftKey   = isP1 ? keys['ArrowLeft']  : keys['KeyA'];
   const rightKey  = isP1 ? keys['ArrowRight'] : keys['KeyD'];
-  const leftSpeed = cfg.speed * 0.65;
-  p.vx = rightKey ? MOVE_SPEED : leftKey ? -leftSpeed : 0;
+  p.vx = rightKey ? MOVE_SPEED : leftKey ? -MOVE_SPEED : 0;
   p.x  = Math.max(PLAYER_SIZE / 2 + 4, Math.min(W - PLAYER_SIZE / 2 - 4, p.x + p.vx));
 
   const aboveDitch = ditches.some(d => p.x > d.x + 8 && p.x < d.x + d.w - 8);
@@ -955,25 +1123,25 @@ function updatePlayer(p, cfg) {
   if (p.donkeyBoxCD    > 0) p.donkeyBoxCD--;
   if (p.wolfCooldown   > 0) p.wolfCooldown--;
 
-  if (p.animalIdx === 1 && p.onGround && p.barkCooldown === 0 && _dnKeySa) {
+  if (p.animalIdx === 1 && p.barkCooldown === 0 && p.floatFrames === 0 && p.rocketFrames === 0 && _dnKeySa) {
     // Dog bark: freeze all visible enemies for 90 frames
     for (const o of obstacles) {
       if (o.type === 'lion' || o.type === 'vulture' || o.type === 'kangaroo')
-        o.frozenFrames = 90;
+        o.frozenFrames = 180;
     }
     p.barkCooldown = 300;
     playPunch();
     popups.push({ x: p.x, y: p.y - 50, text: 'WUFF!', life: 60, color: '#FFE040' });
   }
 
-  if (p.animalIdx === 2 && p.onGround && p.scratchCooldown === 0 && _dnKeySa) {
+  if (p.animalIdx === 2 && p.scratchCooldown === 0 && p.floatFrames === 0 && p.rocketFrames === 0 && _dnKeySa) {
     // Cat: shoot yarn ball to the right
     yarnBalls.push({ x: p.x + 20, y: p.y - PLAYER_SIZE / 2, vx: 9, r: 10 });
     p.scratchCooldown = 180;
     playPling();
   }
 
-  if (p.animalIdx === 4 && p.onGround && p.wolfCooldown === 0 && _dnKeySa) {
+  if (p.animalIdx === 4 && p.wolfCooldown === 0 && p.floatFrames === 0 && p.rocketFrames === 0 && _dnKeySa) {
     // Wolf howl: summon shadow wolf that sweeps the screen from right to left
     shadowWolves.push({ x: W + 58, y: GROUND_Y, w: 58, h: 62, owner: p });
     p.wolfCooldown = 480;
@@ -1000,6 +1168,9 @@ function explodeBox(o) {
     });
   }
   o.x = -600; // remove from play
+  const boxPts = level >= 5 ? 20 : 5;
+  addScore(boxPts);
+  popups.push({ x: cx, y: cy - 10, text: `+${boxPts}`, life: 45, color: '#FFD700' });
 }
 
 // ── Spawn helpers ─────────────────────────────────────────────────────────────
@@ -1007,7 +1178,7 @@ const BOX_W = 44, BOX_H = 46;
 
 function spawnNext(cfg) {
   const roll        = Math.random();
-  const ditchProb   = 0.22;
+  const ditchProb   = level >= 5 ? 0.11 : 0.22;
   const enemyTotal  = cfg.lionRatio * (1 - ditchProb);
   // Enemy mix scales with level: L1=lion only, L2+=vulture, L3+=kangaroo
   const lionProb    = enemyTotal * (level >= 3 ? 0.38 : level >= 2 ? 0.57 : 1.00);
@@ -1070,10 +1241,14 @@ function spawnNext(cfg) {
     spawner.lastType = 'platform';
 
   } else {
-    // Box cluster (1–8)
-    const n = clusterSize();
-    spawnCluster(n);
-    spawnedWidth = n * BOX_W;
+    // Box cluster — level 6 always uses 2-platform stepping-stone variant
+    if (level === 6) {
+      spawnedWidth = spawnLevel6Cluster();
+    } else {
+      const n = clusterSize();
+      spawnCluster(n);
+      spawnedWidth = n * BOX_W;
+    }
     spawner.lastType = 'box';
   }
 
@@ -1088,6 +1263,7 @@ function spawnNext(cfg) {
     const gapStart = W + 20 + (spawnedWidth || 0) + 50;
     const spacing  = 44 + Math.floor(Math.random() * 36);
     for (let i = 0; i < count && spawner.diamondBudget > 0; i++) {
+      if (50 + i * spacing >= gapPx) break; // would reach next cluster — skip
       diamonds.push({ x: gapStart + i * spacing, y: GROUND_Y - 20,
                       color: DIAMOND.box.color, pts: DIAMOND.box.pts });
       spawner.diamondBudget--;
@@ -1180,6 +1356,97 @@ function spawnCluster(n) {
   }
 }
 
+// Level 6: layers narrow by 2 per row (compact staircase), max 4 layers.
+function buildLayersL6(n) {
+  const layers = [];
+  for (let w = n; w >= 1 && layers.length < 4; w -= 2) layers.push(w);
+  return layers;
+}
+
+// Level 6: 2 fixed stepping stones + main pyramid cluster (max 4 layers).
+// Returns total spawned width for spawner.cd calc.
+function spawnLevel6Cluster() {
+  const x0 = W + 20;
+
+  // Stepping stone A — 2 wide, 2 high
+  for (let row = 0; row < 2; row++) {
+    const y = GROUND_Y - BOX_H * (row + 1);
+    for (let i = 0; i < 2; i++) {
+      obstacles.push({ x: x0 + i * BOX_W, y, w: BOX_W, h: BOX_H, type: 'box' });
+    }
+  }
+
+  // Stepping stone B — 2 wide, 3 high (1-box gap after A)
+  const stoneB = x0 + 3 * BOX_W;
+  for (let row = 0; row < 3; row++) {
+    const y = GROUND_Y - BOX_H * (row + 1);
+    for (let i = 0; i < 2; i++) {
+      obstacles.push({ x: stoneB + i * BOX_W, y, w: BOX_W, h: BOX_H, type: 'box' });
+    }
+  }
+
+  // Main cluster — 1-box gap after stone B; base width 4–7
+  const clx = x0 + 6 * BOX_W;
+  const n = 4 + Math.floor(Math.random() * 4); // 4–7 → 2–4 layers
+  const layers = buildLayersL6(n);
+  const colTop    = new Map();
+  const colTopRef = new Map();
+
+  layers.forEach((layerW, row) => {
+    const xOff = row * BOX_W; // 1-box horizontal offset per layer
+    const y    = GROUND_Y - BOX_H * (row + 1);
+    for (let i = 0; i < layerW; i++) {
+      const bx  = clx + xOff + i * BOX_W;
+      const obj = { x: bx, y, w: BOX_W, h: BOX_H, type: 'box' };
+      obstacles.push(obj);
+      if (!colTop.has(bx) || y < colTop.get(bx)) {
+        colTop.set(bx, y);
+        colTopRef.set(bx, obj);
+      }
+    }
+  });
+
+  // Trampolines on topmost boxes
+  for (const obj of colTopRef.values()) {
+    if (Math.random() < 0.10) obj.trampoline = true;
+  }
+
+  // Potion on single-height column of main cluster
+  const singleCols = [...colTop.entries()].filter(([, topY]) => topY === GROUND_Y - BOX_H);
+  if (!spawner.potionSpawned && Math.random() < 0.2 && singleCols.length > 0) {
+    const [px] = singleCols[Math.floor(Math.random() * singleCols.length)];
+    potions.push({ x: px + BOX_W / 2, y: GROUND_Y - BOX_H - 22 });
+    spawner.potionSpawned = true;
+  }
+
+  // Rocket on topmost column
+  const rocketMax = twoPlayer ? 2 : 1;
+  if (spawner.rocketCount < rocketMax && Math.random() < 0.10) {
+    const allCols = [...colTop.entries()];
+    if (allCols.length > 0) {
+      const [px, topY] = allCols[Math.floor(Math.random() * allCols.length)];
+      rockets.push({ x: px + BOX_W / 2, y: topY - 26 });
+      spawner.rocketCount++;
+    }
+  }
+
+  // Diamonds on topmost columns
+  if (spawner.diamondBudget > 0 && Math.random() < 0.55) {
+    const cols     = [...colTop.entries()];
+    const count    = Math.min(spawner.diamondBudget, 2);
+    const shuffled = cols.sort(() => Math.random() - 0.5).slice(0, count);
+    for (const [px, topY] of shuffled) {
+      diamonds.push({ x: px + BOX_W / 2, y: topY - 26,
+                      color: DIAMOND.box.color, pts: DIAMOND.box.pts });
+      spawner.diamondBudget--;
+    }
+  }
+
+  // Total width: stone A (2) + gap (1) + stone B (2) + gap (1) + cluster
+  const clusterW = (layers.length - 1) * BOX_W + layers[0] * BOX_W;
+  return 6 * BOX_W + clusterW;
+}
+
 // Returns total spawned width (step + gap + platform + upper tiers) for spawner.cd calc.
 function spawnPlatform(n) {
   const x0    = W + 20;
@@ -1244,6 +1511,15 @@ function spawnPlatform(n) {
   return stepW * BOX_W + gap + n * BOX_W + totalExtraWidth;
 }
 
+// Returns true when no enemy/box obstacle occupies a horizontal window of ±margin around x
+function obstaclesClearAt(x, margin) {
+  return !obstacles.some(o => {
+    if (o.type === 'flag' || o.type === 'platform') return false;
+    const oc = o.x + (o.w || 0) / 2;
+    return oc > 0 && Math.abs(oc - x) < margin;
+  });
+}
+
 function overlaps(p, o) {
   const m = 11;
   return (p.x - PLAYER_SIZE / 2 + m) < (o.x + o.w - m) &&
@@ -1306,6 +1582,8 @@ function draw() {
   drawHearts();
   drawPotions();
   drawRocketItems();
+  drawClocks();
+  drawHourglasses();
   drawParticles();
   drawShadowWolves();
   drawYarnBalls();
@@ -1326,7 +1604,7 @@ function draw() {
 
   if (gs === 'levelend') {
     drawOverlay(`🎉 Level ${level} geschafft!`,
-      level >= 5 ? '▶ Weiter' : `▶ Level ${level + 1}`,
+      level >= 6 ? '▶ Weiter' : `▶ Level ${level + 1}`,
       `Punkte: ${score}`);
   } else if (gs === 'gameover') {
     drawOverlay('💀 Game Over', '🔄 Nochmal spielen',
@@ -1348,32 +1626,49 @@ function drawBackground() {
   ctx.fillStyle = sg;
   ctx.fillRect(0, 0, W, GROUND_Y);
 
-  // Sun glow — layered circles instead of shadowBlur (no GPU flicker)
-  const sunX = W - 80, sunY = 58;
-  const sunR = level >= 4 ? 26 : 32;
-  for (let i = 5; i >= 1; i--) {
-    ctx.fillStyle = cfg.sunGlow + (0.06 * i) + ')';
-    ctx.beginPath();
-    ctx.arc(sunX, sunY, sunR + i * 10, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  ctx.fillStyle = cfg.sunColor;
-  ctx.beginPath();
-  ctx.arc(sunX, sunY, sunR, 0, Math.PI * 2);
-  ctx.fill();
-
-  // Clouds
-  for (const c of clouds) drawCloud(c.x, c.y, c.r, level >= 4);
-
-  // Scrolling hills (levels 1–2) — hillOff is continuous, no modulo wrap-jump
-  if (level <= 2) {
-    ctx.fillStyle = 'rgba(80,140,60,0.30)';
-    const ho = hillOff % 200;
-    for (let hx = -ho; hx < W + 200; hx += 200) {
+  if (level === 6) {
+    // Moon
+    const moonX = W - 80, moonY = 58;
+    ctx.fillStyle = 'rgba(180,180,220,0.12)';
+    ctx.beginPath(); ctx.arc(moonX, moonY, 46, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = 'rgba(200,200,240,0.22)';
+    ctx.beginPath(); ctx.arc(moonX, moonY, 36, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#d8d8f0';
+    ctx.beginPath(); ctx.arc(moonX, moonY, 26, 0, Math.PI * 2); ctx.fill();
+    // Scrolling skyscrapers (behind everything)
+    drawSkyscrapers();
+  } else {
+    // Sun glow — layered circles instead of shadowBlur (no GPU flicker)
+    const sunX = W - 80, sunY = 58;
+    const sunR = level >= 4 ? 26 : 32;
+    for (let i = 5; i >= 1; i--) {
+      ctx.fillStyle = cfg.sunGlow + (0.06 * i) + ')';
       ctx.beginPath();
-      ctx.arc(hx + 100, GROUND_Y, 90, Math.PI, 0);
+      ctx.arc(sunX, sunY, sunR + i * 10, 0, Math.PI * 2);
       ctx.fill();
     }
+    ctx.fillStyle = cfg.sunColor;
+    ctx.beginPath();
+    ctx.arc(sunX, sunY, sunR, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Clouds
+    for (const c of clouds) drawCloud(c.x, c.y, c.r, level >= 4);
+
+    // Scrolling hills (level 1) — hillOff is continuous, no modulo wrap-jump
+    if (level === 1) {
+      ctx.fillStyle = 'rgba(80,140,60,0.30)';
+      const ho = hillOff % 200;
+      for (let hx = -ho; hx < W + 200; hx += 200) {
+        ctx.beginPath();
+        ctx.arc(hx + 100, GROUND_Y, 90, Math.PI, 0);
+        ctx.fill();
+      }
+    }
+
+    // Forest background (level 2) — two parallax layers of trees
+    if (level === 2) drawForest();
+
   }
 
   // Ground — drawn in segments, with gaps for ditches
@@ -1431,6 +1726,107 @@ function drawCloud(x, y, r, dark) {
   ctx.fill();
 }
 
+// ── City skyline (level 6) ────────────────────────────────────────────────────
+// Building layout within a 960px repeating tile (tiled seamlessly)
+const CITY_BLDGS = [
+  { dx:   0, w: 68, h: 310 },
+  { dx:  78, w: 46, h: 215 },
+  { dx: 133, w: 86, h: 385 },
+  { dx: 228, w: 56, h: 265 },
+  { dx: 293, w: 74, h: 425 },
+  { dx: 376, w: 50, h: 245 },
+  { dx: 435, w: 94, h: 340 },
+  { dx: 538, w: 60, h: 285 },
+  { dx: 608, w: 80, h: 365 },
+  { dx: 697, w: 54, h: 225 },
+  { dx: 760, w: 88, h: 410 },
+  { dx: 857, w: 66, h: 305 },
+];
+
+function drawSkyscrapers() {
+  const scroll = (hillOff * 0.55) % W;
+  for (let rep = -1; rep <= 1; rep++) {
+    for (const b of CITY_BLDGS) {
+      const bx = b.dx - scroll + rep * W;
+      if (bx + b.w < 0 || bx > W) continue;
+      const by = GROUND_Y - b.h;
+      // Building silhouette
+      ctx.fillStyle = '#0c0c1e';
+      ctx.fillRect(bx, by, b.w, b.h);
+      // Faint edge highlight
+      ctx.fillStyle = 'rgba(60,60,120,0.5)';
+      ctx.fillRect(bx, by, 2, b.h);
+      // Windows — deterministic grid
+      const ww = 6, wh = 5, wgx = 10, wgy = 11;
+      const cols = Math.max(1, Math.floor((b.w - 8) / wgx));
+      const rows = Math.max(1, Math.floor((b.h - 18) / wgy));
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const lit = ((b.dx + r * 13 + c * 7) % 11) < 8;
+          ctx.fillStyle = lit ? 'rgba(255,238,150,0.72)' : 'rgba(20,20,50,0.6)';
+          ctx.fillRect(bx + 4 + c * wgx, by + 12 + r * wgy, ww, wh);
+        }
+      }
+    }
+  }
+}
+
+// ── Forest background (level 2) ───────────────────────────────────────────────
+// Each layer is an array of { dx, trunkH, crownR } within a W-wide repeating tile.
+const FOREST_BACK = [
+  { dx:  30, trunkH: 95,  crownR: 38 },
+  { dx: 105, trunkH: 115, crownR: 44 },
+  { dx: 195, trunkH: 80,  crownR: 32 },
+  { dx: 270, trunkH: 130, crownR: 50 },
+  { dx: 370, trunkH: 90,  crownR: 36 },
+  { dx: 450, trunkH: 120, crownR: 46 },
+  { dx: 545, trunkH: 75,  crownR: 30 },
+  { dx: 620, trunkH: 105, crownR: 40 },
+  { dx: 710, trunkH: 135, crownR: 52 },
+  { dx: 800, trunkH: 88,  crownR: 35 },
+  { dx: 880, trunkH: 118, crownR: 43 },
+];
+const FOREST_FRONT = [
+  { dx:  15, trunkH: 140, crownR: 55 },
+  { dx: 130, trunkH: 160, crownR: 62 },
+  { dx: 245, trunkH: 125, crownR: 50 },
+  { dx: 355, trunkH: 170, crownR: 66 },
+  { dx: 480, trunkH: 145, crownR: 56 },
+  { dx: 595, trunkH: 155, crownR: 60 },
+  { dx: 715, trunkH: 130, crownR: 52 },
+  { dx: 825, trunkH: 165, crownR: 64 },
+];
+
+function drawForestLayer(trees, scrollFactor, trunkColor, crownColor) {
+  const scroll = (hillOff * scrollFactor) % W;
+  for (let rep = -1; rep <= 1; rep++) {
+    for (const t of trees) {
+      const tx = t.dx - scroll + rep * W;
+      if (tx + t.crownR * 2 < 0 || tx - t.crownR > W) continue;
+      const baseY = GROUND_Y;
+      const trunkW = Math.round(t.crownR * 0.22);
+      // Trunk
+      ctx.fillStyle = trunkColor;
+      ctx.fillRect(tx - trunkW / 2, baseY - t.trunkH, trunkW, t.trunkH);
+      // Crown — stacked circles for a full leafy look
+      ctx.fillStyle = crownColor;
+      ctx.beginPath();
+      ctx.arc(tx,                    baseY - t.trunkH - t.crownR * 0.55, t.crownR,        0, Math.PI * 2);
+      ctx.arc(tx - t.crownR * 0.55, baseY - t.trunkH - t.crownR * 0.25, t.crownR * 0.78, 0, Math.PI * 2);
+      ctx.arc(tx + t.crownR * 0.55, baseY - t.trunkH - t.crownR * 0.25, t.crownR * 0.78, 0, Math.PI * 2);
+      ctx.arc(tx,                    baseY - t.trunkH + t.crownR * 0.10, t.crownR * 0.70, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
+function drawForest() {
+  // Back layer — smaller, lighter, slower parallax
+  drawForestLayer(FOREST_BACK,  0.18, 'rgba(40,28,14,0.50)', 'rgba(34,80,28,0.45)');
+  // Front layer — taller, darker, faster parallax (but still behind ground objects)
+  drawForestLayer(FOREST_FRONT, 0.38, 'rgba(30,18,8,0.70)',  'rgba(22,60,18,0.65)');
+}
+
 // ── Explosion particles ────────────────────────────────────────────────────────
 function drawParticles() {
   for (const pt of particles) {
@@ -1460,6 +1856,66 @@ function drawShadowWolves() {
     ctx.beginPath();
     ctx.ellipse(sw.x + sw.w / 2, sw.y - sw.h / 2, sw.w * 0.7, sw.h * 0.55, 0, 0, Math.PI * 2);
     ctx.fill();
+    ctx.restore();
+  }
+}
+
+// ── Clock & hourglass collectibles ────────────────────────────────────────────
+function drawClocks() {
+  for (const c of clocks) {
+    const bob = Math.sin(frame * 0.08 + c.x * 0.01) * 4;
+    ctx.save();
+    ctx.translate(c.x, c.y + bob);
+    // Glow
+    ctx.shadowColor = '#ffcc00'; ctx.shadowBlur = 12;
+    // Outer case
+    ctx.beginPath(); ctx.arc(0, 0, 14, 0, Math.PI * 2);
+    ctx.fillStyle = '#e6a800'; ctx.fill();
+    ctx.strokeStyle = '#fff8cc'; ctx.lineWidth = 2; ctx.stroke();
+    // Face
+    ctx.beginPath(); ctx.arc(0, 0, 11, 0, Math.PI * 2);
+    ctx.fillStyle = '#fffde0'; ctx.fill();
+    // Hour and minute hands
+    ctx.strokeStyle = '#333'; ctx.lineWidth = 2; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, -7); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(5, -4); ctx.stroke();
+    // Center dot
+    ctx.beginPath(); ctx.arc(0, 0, 1.5, 0, Math.PI * 2);
+    ctx.fillStyle = '#333'; ctx.fill();
+    // Crown/button on top
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#cc8800';
+    ctx.fillRect(-3, -17, 6, 5);
+    ctx.restore();
+  }
+}
+
+function drawHourglasses() {
+  for (const h of hourglasses) {
+    const bob = Math.sin(frame * 0.08 + h.x * 0.01) * 4;
+    ctx.save();
+    ctx.translate(h.x, h.y + bob);
+    ctx.shadowColor = '#88aaff'; ctx.shadowBlur = 12;
+    // Frame (top + bottom bars)
+    ctx.fillStyle = '#6688cc';
+    ctx.fillRect(-10, -16, 20, 3);
+    ctx.fillRect(-10,  13, 20, 3);
+    // Top sand (triangle pointing down)
+    ctx.beginPath();
+    ctx.moveTo(-9, -13); ctx.lineTo(9, -13); ctx.lineTo(0, 0); ctx.closePath();
+    ctx.fillStyle = '#ddeeff'; ctx.fill();
+    // Sand falling
+    ctx.fillStyle = '#f5d060';
+    ctx.beginPath();
+    ctx.moveTo(-9, -13); ctx.lineTo(9, -13); ctx.lineTo(0, -5); ctx.closePath();
+    ctx.fill();
+    // Bottom sand (small mound)
+    ctx.beginPath();
+    ctx.moveTo(0, 0); ctx.lineTo(-9, 13); ctx.lineTo(9, 13); ctx.closePath();
+    ctx.fillStyle = '#ddeeff'; ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(-6, 13); ctx.lineTo(6, 13); ctx.lineTo(0, 6); ctx.closePath();
+    ctx.fillStyle = '#f5d060'; ctx.fill();
     ctx.restore();
   }
 }
@@ -2352,7 +2808,7 @@ function drawHUD() {
   ctx.fillStyle = '#fff';
   ctx.font      = 'bold 17px Arial';
   ctx.textAlign = 'right';
-  ctx.fillText(`Level ${level} / 5`, W - 12, 33);
+  ctx.fillText(`Level ${level} / ${LEVEL_CFG.length}`, W - 12, 33);
 
   // Progress bar
   ctx.fillStyle = 'rgba(0,0,0,0.35)';
@@ -2364,6 +2820,53 @@ function drawHUD() {
   ctx.font      = '11px Arial';
   ctx.textAlign = 'right';
   ctx.fillText('Ziel ▶', W - 14, H - 26);
+
+  // Active time-effect indicators
+  if (clockFrames > 0) {
+    const secs = Math.ceil(clockFrames / 60);
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    rrect(14, 52, 110, 26, 6); ctx.fill();
+    ctx.fillStyle = '#ffcc00';
+    ctx.font = 'bold 13px Arial'; ctx.textAlign = 'left';
+    ctx.fillText(`⚡ 2× Tempo  ${secs}s`, 22, 70);
+  }
+  if (hourglassFrames > 0) {
+    const secs = Math.ceil(hourglassFrames / 60);
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    rrect(14, 52, 120, 26, 6); ctx.fill();
+    ctx.fillStyle = '#88aaff';
+    ctx.font = 'bold 13px Arial'; ctx.textAlign = 'left';
+    ctx.fillText(`🐢 Zeitlupe  ${secs}s`, 22, 70);
+  }
+
+  // Virtual buttons (mobile only)
+  if (isMobile) drawMobileButtons();
+}
+
+function drawMobileButtons() {
+  const defs = [
+    { key: 'left',    label: '◀', color: '#2255cc' },
+    { key: 'right',   label: '▶', color: '#2255cc' },
+    { key: 'special', label: '★', color: '#884400' },
+    { key: 'jump',    label: '▲', color: '#226622' },
+  ];
+  for (const { key, label, color } of defs) {
+    const b       = MB[key];
+    const pressed = [...activeTouches.values()].includes(key);
+    ctx.globalAlpha = pressed ? 0.80 : 0.45;
+    ctx.fillStyle   = color;
+    rrect(b.x, b.y, b.w, b.h, 14); ctx.fill();
+    ctx.globalAlpha = pressed ? 0.95 : 0.60;
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth   = 2;
+    rrect(b.x, b.y, b.w, b.h, 14); ctx.stroke();
+    ctx.globalAlpha = pressed ? 1.0 : 0.75;
+    ctx.fillStyle   = '#ffffff';
+    ctx.font        = 'bold 28px Arial';
+    ctx.textAlign   = 'center';
+    ctx.fillText(label, b.x + b.w / 2, b.y + b.h / 2 + 10);
+  }
+  ctx.globalAlpha = 1;
 }
 
 // ── Overlays ──────────────────────────────────────────────────────────────────
@@ -2488,7 +2991,7 @@ function drawSelect() {
   // ── Animal card rows ───────────────────────────────────────────────────────
   const rowDefs = [
     { label: 'Spieler 1', labelColor: '#80ddff', rowY: SEL_P1_Y, selIdx: selAnimal  },
-    { label: 'Spieler 2', labelColor: '#ffdd80', rowY: SEL_P2_Y, selIdx: selAnimal2 },
+    ...(!isMobile ? [{ label: 'Spieler 2', labelColor: '#ffdd80', rowY: SEL_P2_Y, selIdx: selAnimal2 }] : []),
   ];
 
   for (const { label, labelColor, rowY, selIdx } of rowDefs) {
@@ -2533,10 +3036,12 @@ function drawSelect() {
   }
 
   // ── Mode buttons ───────────────────────────────────────────────────────────
-  const btns = [
-    { btn: getTwoPlayerBtn(), label: '🧍  1 Spieler' },
-    { btn: getSoloBtn(),      label: '👥  2 Spieler' },
-  ];
+  const btns = isMobile
+    ? [{ btn: { x: W / 2 - 100, y: SEL_BTN_Y, w: 200, h: 50 }, label: '▶  Spielen' }]
+    : [
+        { btn: getTwoPlayerBtn(), label: '🧍  1 Spieler' },
+        { btn: getSoloBtn(),      label: '👥  2 Spieler' },
+      ];
   for (const { btn, label } of btns) {
     ctx.fillStyle = 'rgba(39,174,96,0.28)';
     rrect(btn.x - 4, btn.y - 4, btn.w + 8, btn.h + 8, 18); ctx.fill();
@@ -2600,13 +3105,25 @@ function rrect(x, y, w, h, r) {
 }
 
 // ── Game loop ─────────────────────────────────────────────────────────────────
-function loop() {
-  update();
+const FIXED_STEP = 1000 / 60; // 16.67 ms per logic tick
+let   _lastTime  = 0;
+let   _accum     = 0;
+
+function loop(timestamp) {
+  const delta = Math.min(timestamp - _lastTime, 100); // cap: avoid spiral of death
+  _lastTime   = timestamp;
+  _accum     += delta;
+
+  while (_accum >= FIXED_STEP) {
+    update();
+    _accum -= FIXED_STEP;
+  }
+
   draw();
   requestAnimationFrame(loop);
 }
 
-loop();
+requestAnimationFrame(loop);
 </script>
 <!-- Matomo Image Tracker-->
 <img referrerpolicy="no-referrer-when-downgrade" src="https://any-where.de/matomo/matomo.php?idsite=1&amp;rec=1" style="border:0" alt="" />
