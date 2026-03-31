@@ -48,7 +48,7 @@ Pro Level: `speed`, `lionRatio`, `gapLo/Hi`, `ditchWMin/Max`, Sky-/Bodenfarben.
 
 > **Level 6 – Besonderheiten:**
 > - Hintergrund: scrollende Hochhaus-Silhouetten mit Fenstern (`drawSkyscrapers()`), Mond statt Sonne.
-> - Kasten-Cluster via `spawnLevel6Cluster()`: immer 2 feste Stepping-Stones davor (Stein A: 2×2, Stein B: 2×3), dann Pyramide max. 4 Lagen (`buildLayersL6`, Versatz 1 Kasten pro Lage, Basisbreite 4–7).
+> - Kasten-Cluster: max. 4 Spalten hoch; Stepping-Stone-Profil (Aufstieg → Peak → Abstieg), erzeugt via `chooseMaxHeight()` + `generateBoxBlock()`.
 > - HUD zeigt `Level X / 6` (automatisch aus `LEVEL_CFG.length`).
 
 ### `DIAMOND`
@@ -109,6 +109,38 @@ Alle Sonderfähigkeiten sind **auch in der Luft** auslösbar (kein Bodencheck).
 
 ---
 
+##Kisten - Anordnung
+Kisten können in unterschiedlichen Höhen auftauchen:
+- eine Reihe
+- zwei Reihen
+- drei Reihen
+- vier Reihen (ab Level 6)
+
+Kisten stehen in Blöcken nebeneinander. Blöcke stehen entweder immer direkt nebeneinander ohne Lücken oder haben mindestens 2 Felder Platz. Ab Level 6 sind es entweder gar keine Lücken zwischen Blöcken oder mindestens 5 Felder, damit genug Platz zum Landen ist.
+Wenn Blöcke direkt nebeneinannderstehen, müssen mindestens 2 Blöcke nebeneinander die gleiche Höhe zum Aufstieg haben. 
+
+Beispiel für eine Reihe (Kiste: x, keine Kiste: o):
+
+xxooxxxoooxooxoooox
+
+Beispiel für zwei Reihen:
+ooxxoooooxoooooooxx
+xxxxooooxxooooxooxx
+
+Beispielfür drei Reihen:
+ooooxxooooooooxxooo
+ooxxxxooooxxxxxxooo
+xxxxxxxxooxxooxxooo
+
+Beispiel für vier Reihen:
+ooooooxxooooooooooo
+ooooooxxooooooooooo
+ooooxxxxxxoooooxxoo
+ooxxxxxxxxoooxxxxoo
+
+Wichtig ist:
+- damit man auf 3 oder 4 Reihen springen kann, müssen davor Kisten stehen, von denen man abspringen kann. Diese sind maximal 2 Kisten hoch und mindestens 2 Kisten breit, damit die Fläche zum Absprung breit genug ist. 
+
 ## Kisten – Raketen-Punkte
 
 Ab Level 1: Kiste per Rakete zerstören → **+5 Punkte**.
@@ -161,9 +193,48 @@ Wahrscheinlichkeiten je Frame:
 | Geier | `lionRatio * 0.4`, nicht nach Gegner (Level 2+) |
 | Känguru | anteilig, nicht nach Gegner (Level 3+) |
 | Plattform | 52 % (2P) / 35 % (1P) des verbleibenden Anteils |
-| Kasten-Cluster | Rest — Level 6: immer `spawnLevel6Cluster()` |
+| Kasten-Cluster | Rest — alle Level via `spawnBoxCluster()` |
 
 Nach einem Gegner: Mindestabstand 340 px (damit Stomp-Bounce sicher landet).
+
+### Mindestabstand zwischen Kasten-Clustern
+
+Position-basierter Check: `lastBoxRight > spawnX - minGapPx` (wobei `lastBoxRight` das Rechts-Ende des letzten Kasten-Hindernisses via `obstacles.reduce` ist).
+
+- Level 1–5: `minGapPx = 2 * BOX_W`
+- Level 6: `minGapPx = 5 * BOX_W`
+
+Ist der Abstand zu gering, wird statt eines Kasten-Clusters eine Plattform gespawnt.
+
+---
+
+## Kasten-Cluster-Funktionen
+
+### `chooseMaxHeight()`
+Gibt die maximale Spaltenhöhe (1–4) für den nächsten Cluster zurück, abhängig vom aktuellen Level:
+
+| Level | Verteilung |
+|---|---|
+| 1–2 | 35 % → 2, 65 % → 1 |
+| 3–4 | 35 % → 1, 35 % → 2, 30 % → 3 |
+| 5 | 20 % → 1, 35 % → 2, 45 % → 3 |
+| 6 | 15 % → 2, 35 % → 3, 50 % → 4 |
+
+### `generateBoxBlock(maxH)`
+Gibt ein Array von Spaltenhöhen zurück (Mountain-Profil: Aufstieg → Peak → Abstieg). **Kein interne Lücken** — alle Spalten direkt nebeneinander.
+
+- `maxH === 1`: flacher Block, 1–5 Spalten, alle Höhe 1
+- `maxH === 2`: 2–6 Spalten, Mischung aus Höhe 1 und 2 (55 % → Höhe 2)
+- `maxH === 3`: `[1,1]` Anlauf, optional `[2,2]` (65 %), Peak mit 1–3 Spalten Höhe 3, optional Abstieg `[2,1]` oder `[2]`
+- `maxH === 4`: `[1,1,2,2]` Anlauf (Pflicht), Peak 1–3 Spalten Höhe 4, optional Abstieg `[2,2,1]` oder `[2,2]`
+
+> Die Anlauf-Spalten (max. 2 hoch, min. 2 breit) erfüllen die Regel, dass man auf hohe Türme abspringen kann.
+
+### `spawnBoxCluster()`
+Einheitliche Spawn-Funktion für alle Level:
+1. Ruft `chooseMaxHeight()` und `generateBoxBlock(maxH)` auf
+2. Setzt für jede Spalte `obstacles`-Einträge (Typ `'box'`, gestapelt von Boden bis Spaltenhöhe)
+3. Platziert Diamanten, Trampolins und Collectibles wie bisher
 
 ---
 

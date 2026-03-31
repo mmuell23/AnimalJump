@@ -22,6 +22,11 @@
       border-radius: 16px;
       box-shadow: 0 0 60px rgba(255, 160, 50, 0.3);
     }
+    @media (pointer: fine) {
+      canvas {
+        border: 3px solid rgba(255, 160, 50, 0.6);       
+      }
+    }
   </style>
 </head>
 <body>
@@ -44,6 +49,29 @@ function fitCanvas() {
 }
 (window.visualViewport ?? window).addEventListener('resize', fitCanvas);
 fitCanvas();
+
+// ── Spawn-RNG (seeded, only used by the spawner — sounds/particles use native Math.random) ──
+// This ensures the level sequence is identical on ditch-restart without being
+// contaminated by RNG calls from sounds, particles, or enemy physics.
+let _spawnRngState  = 1;
+let _savedSpawnSeed = 1;
+
+function spawnRng() {
+  // mulberry32
+  _spawnRngState = (_spawnRngState + 0x6D2B79F5) | 0;
+  let t = Math.imul(_spawnRngState ^ (_spawnRngState >>> 15), 1 | _spawnRngState);
+  t = t + Math.imul(t ^ (t >>> 7), 61 | t) ^ t;
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
+
+function freshLevelSeed() {
+  // New seed from real time so every fresh level is different
+  _savedSpawnSeed = _spawnRngState = ((performance.now() * 10000) | 0) | 1;
+}
+
+function restoreLevelSeed() {
+  _spawnRngState = _savedSpawnSeed;
+}
 
 const GROUND_Y    = H - 80;
 const PLAYER_X    = 130;
@@ -494,6 +522,7 @@ document.addEventListener('keydown', e => {
     level = parseInt(digitMatch[1]);
     lives = 3;
     score = 0;
+    freshLevelSeed();
     initLevel();
     gs = 'playing';
   }
@@ -637,6 +666,7 @@ function startGame() {
   level = 1;
   lives = 3;
   score = 0;
+  freshLevelSeed();
   initLevel();
   gs = 'playing';
 }
@@ -668,12 +698,12 @@ function initLevel() {
     cd: 160,
     lastType: '',
     platformCount: 0,
-    diamondBudget: 10 + Math.floor(Math.random() * 11),
+    diamondBudget: 10 + Math.floor(spawnRng() * 11),
     potionSpawned: false,
     rocketCount: 0,
     clockSpawned: false,
     hourglassSpawned: false,
-    highDiaCD: 200 + Math.floor(Math.random() * 100),
+    highDiaCD: 200 + Math.floor(spawnRng() * 100),
   };
   players = [ makePlayer(PLAYER_X, selAnimal) ];
   if (twoPlayer) players.push(makePlayer(PLAYER_X2, selAnimal2));
@@ -683,6 +713,7 @@ function initLevel() {
 function advanceLevel() {
   if (level >= 6) { gs = 'win'; return; }
   level++;
+  freshLevelSeed();
   initLevel();
   gs = 'playing';
 }
@@ -904,15 +935,15 @@ function updateSpawner(cfg) {
   // High diamonds — only reachable in float mode (y ≈ 60–130, above max jump height)
   spawner.highDiaCD--;
   if (spawner.highDiaCD <= 0 && frame < flagSpawnFrame - clearZoneFrames) {
-    const count   = 2 + Math.floor(Math.random() * 4);
-    const baseY   = 60 + Math.floor(Math.random() * 70);
-    const spacing = 55 + Math.floor(Math.random() * 40);
+    const count   = 2 + Math.floor(spawnRng() * 4);
+    const baseY   = 60 + Math.floor(spawnRng() * 70);
+    const spacing = 55 + Math.floor(spawnRng() * 40);
     for (let i = 0; i < count; i++) {
-      const jitter = Math.floor(Math.random() * 30) - 15;
+      const jitter = Math.floor(spawnRng() * 30) - 15;
       diamonds.push({ x: W + 30 + i * spacing, y: baseY + jitter,
                       color: DIAMOND.high.color, pts: DIAMOND.high.pts });
     }
-    spawner.highDiaCD = 260 + Math.floor(Math.random() * 140);
+    spawner.highDiaCD = 260 + Math.floor(spawnRng() * 140);
   }
 
   if (frame === flagSpawnFrame) {
@@ -1190,7 +1221,7 @@ function explodeBox(o) {
 const BOX_W = 44, BOX_H = 46;
 
 function spawnNext(cfg) {
-  const roll        = Math.random();
+  const roll        = spawnRng();
   const ditchProb   = level >= 5 ? 0.11 : 0.22;
   const enemyTotal  = cfg.lionRatio * (1 - ditchProb);
   // Enemy mix scales with level: L1=lion only, L2+=vulture, L3+=kangaroo
@@ -1203,7 +1234,7 @@ function spawnNext(cfg) {
 
   if (roll < ditchProb) {
     // Ditch
-    const w = cfg.ditchWMin + Math.random() * (cfg.ditchWMax - cfg.ditchWMin);
+    const w = cfg.ditchWMin + spawnRng() * (cfg.ditchWMax - cfg.ditchWMin);
     ditches.push({ x: W + 20, w });
     spawnedWidth = w;
     spawner.lastType = 'ditch';
@@ -1220,9 +1251,9 @@ function spawnNext(cfg) {
     const vw = 68, vh = 44;
     const vYLow  = GROUND_Y - vh;
     const vYHigh = GROUND_Y - 195;
-    const startTop = Math.random() < 0.5;
-    const waitBot  = 60 + Math.floor(Math.random() * 60);
-    const waitTop  = 50 + Math.floor(Math.random() * 50);
+    const startTop = spawnRng() < 0.5;
+    const waitBot  = 60 + Math.floor(spawnRng() * 60);
+    const waitTop  = 50 + Math.floor(spawnRng() * 50);
     obstacles.push({
       x: W + 20,
       y: startTop ? vYHigh : vYLow,
@@ -1241,40 +1272,47 @@ function spawnNext(cfg) {
     const kw = 52, kh = 68;
     obstacles.push({
       x: W + 20, y: GROUND_Y - kh, w: kw, h: kh, type: 'kangaroo',
-      vy: 0, vx: 0, jumpTimer: 20 + Math.floor(Math.random() * 20),
+      vy: 0, vx: 0, jumpTimer: 20 + Math.floor(spawnRng() * 20),
     });
     spawnedWidth = kw;
     enemySpawned = true;
     spawner.lastType = 'kangaroo';
 
-  } else if (Math.random() < (twoPlayer ? 0.52 : 0.35)) {
+  } else if (spawnRng() < (twoPlayer ? 0.52 : 0.35)) {
     // Floating platform with stepping-stone boxes
-    const n = Math.max(2, Math.floor(Math.random() * 5) + 2);
+    const n = Math.max(2, Math.floor(spawnRng() * 5) + 2);
     spawnedWidth = spawnPlatform(n);
     spawner.lastType = 'platform';
 
   } else {
-    // Box cluster — level 6 always uses 2-platform stepping-stone variant
-    if (level === 6) {
-      spawnedWidth = spawnLevel6Cluster();
+    // Box cluster — check actual positions: last box must be ≥ 5 boxes left of spawn point
+    const spawnX      = W + 20;
+    const minGapPx    = level >= 6 ? 5 * BOX_W : 2 * BOX_W;
+    const lastBoxRight = obstacles.reduce(
+      (mx, o) => o.type === 'box' ? Math.max(mx, o.x + o.w) : mx, -Infinity);
+    const boxTooClose = lastBoxRight > spawnX - minGapPx;
+
+    if (boxTooClose) {
+      // Not enough room yet — spawn a platform instead and try boxes next time
+      const n = Math.max(2, Math.floor(spawnRng() * 5) + 2);
+      spawnedWidth = spawnPlatform(n);
+      spawner.lastType = 'platform';
     } else {
-      const n = clusterSize();
-      spawnCluster(n);
-      spawnedWidth = n * BOX_W;
+      spawnedWidth = spawnBoxCluster();
+      spawner.lastType = 'box';
     }
-    spawner.lastType = 'box';
   }
 
   // Enemies need a large gap so stomp-bounce can't chain into the next obstacle
   const gapMin = enemySpawned ? Math.max(cfg.gapLo, 340) : cfg.gapLo;
-  const gapPx  = gapMin + Math.random() * (cfg.gapHi - gapMin);
+  const gapPx  = gapMin + spawnRng() * Math.max(0, cfg.gapHi - gapMin);
   spawner.cd = Math.round((spawnedWidth + gapPx) / cfg.speed);
 
   // Occasionally scatter ground-level diamonds in the gap (clear of any obstacle)
-  if (spawner.diamondBudget > 0 && spawner.lastType !== 'ditch' && Math.random() < 0.45) {
-    const count    = 1 + Math.floor(Math.random() * 3);
+  if (spawner.diamondBudget > 0 && spawner.lastType !== 'ditch' && spawnRng() < 0.45) {
+    const count    = 1 + Math.floor(spawnRng() * 3);
     const gapStart = W + 20 + (spawnedWidth || 0) + 50;
-    const spacing  = 44 + Math.floor(Math.random() * 36);
+    const spacing  = 44 + Math.floor(spawnRng() * 36);
     for (let i = 0; i < count && spawner.diamondBudget > 0; i++) {
       if (50 + i * spacing >= gapPx) break; // would reach next cluster — skip
       diamonds.push({ x: gapStart + i * spacing, y: GROUND_Y - 20,
@@ -1284,187 +1322,111 @@ function spawnNext(cfg) {
   }
 }
 
-function clusterSize() {
-  // Weighted: 1=30%, 2=25%, 3=18%, 4=12%, 5=7%, 6=4%, 7=3%, 8=1%
-  const r = Math.random();
-  if (r < 0.30) return 1;
-  if (r < 0.55) return 2;
-  if (r < 0.73) return 3;
-  if (r < 0.85) return 4;
-  if (r < 0.92) return 5;
-  if (r < 0.96) return 6;
-  if (r < 0.99) return 7;
-  return 8;
+// ── Box cluster system ────────────────────────────────────────────────────────
+// One contiguous block of adjacent columns with a mountain height profile.
+// Gaps between blocks enforced by position check in spawnNext.
+
+function chooseMaxHeight() {
+  const r = spawnRng();
+  if (level <= 2) return r < 0.35 ? 2 : 1;
+  if (level <= 4) return r < 0.35 ? 1 : r < 0.70 ? 2 : 3;
+  if (level === 5) return r < 0.20 ? 1 : r < 0.55 ? 2 : 3;
+  return r < 0.15 ? 2 : r < 0.50 ? 3 : 4; // level 6
 }
 
-// Returns array of layer widths bottom→top.
-// Each layer is 3 narrower (min 2), offset 2 boxes right → 2-wide left steps.
-// Base 8 → [8, 5, 2], base 6 → [6, 3], base 4 → [4] etc.
-function buildLayers(baseWidth) {
-  const layers = [baseWidth];
-  let w = baseWidth - 3;
-  while (w >= 2) { layers.push(w); w -= 3; }
-  return layers;
+// Returns column-height array for one contiguous block.
+// Heights form a ramp-up → peak → optional descent profile.
+function generateBoxBlock(maxH) {
+  const cols = [];
+  if (maxH === 1) {
+    const w = 1 + Math.floor(spawnRng() * 5);
+    for (let i = 0; i < w; i++) cols.push(1);
+  } else if (maxH === 2) {
+    const w = 2 + Math.floor(spawnRng() * 5);
+    for (let i = 0; i < w; i++) cols.push(spawnRng() < 0.55 ? 2 : 1);
+  } else if (maxH === 3) {
+    // 2 stepping stones h=1, optional 2×h=2, peak, optional descent
+    cols.push(1, 1);
+    if (spawnRng() < 0.65) { cols.push(2, 2); }
+    const peakW = 1 + Math.floor(spawnRng() * 3);
+    for (let i = 0; i < peakW; i++) cols.push(3);
+    const d = spawnRng();
+    if (d < 0.33) { cols.push(2, 1); }
+    else if (d < 0.66) { cols.push(2); }
+  } else { // maxH === 4 — level 6 only
+    // Always 2×h1 + 2×h2 before peak (CLAUDE.md rule)
+    cols.push(1, 1, 2, 2);
+    const peakW = 1 + Math.floor(spawnRng() * 3);
+    for (let i = 0; i < peakW; i++) cols.push(4);
+    const d = spawnRng();
+    if (d < 0.50) { cols.push(2, 2, 1); }
+    else if (d < 0.75) { cols.push(2, 2); }
+  }
+  return cols;
 }
 
-function spawnCluster(n) {
-  const x0 = W + 20;
-  // Track the topmost (lowest y value) box per x-column so diamonds land on the peak
-  const colTop = new Map(); // box left-x → minimum y seen
+// Spawns one box cluster and its collectibles. Returns spawnedWidth in px.
+function spawnBoxCluster() {
+  const heights   = generateBoxBlock(chooseMaxHeight());
+  const x0        = W + 20;
+  const colTopY   = new Map();
+  const colTopRef = new Map();
 
-  // Store object refs so we can mark trampolines after all layers are built
-  const colTopRef = new Map(); // bx → obstacle object at the topmost position
-
-  buildLayers(n).forEach((layerW, row) => {
-    const xOff = row * 2 * BOX_W;
-    const y = GROUND_Y - BOX_H * (row + 1);
-    for (let i = 0; i < layerW; i++) {
-      const bx = x0 + xOff + i * BOX_W;
+  for (let c = 0; c < heights.length; c++) {
+    const h  = heights[c];
+    const bx = x0 + c * BOX_W;
+    for (let row = 0; row < h; row++) {
+      const y   = GROUND_Y - BOX_H * (row + 1);
       const obj = { x: bx, y, w: BOX_W, h: BOX_H, type: 'box' };
       obstacles.push(obj);
-      if (!colTop.has(bx) || y < colTop.get(bx)) {
-        colTop.set(bx, y);
-        colTopRef.set(bx, obj);
-      }
-    }
-  });
-
-  // Mark ~1 in 10 topmost boxes as trampolines — level 2+
-  if (level >= 2) {
-    for (const obj of colTopRef.values()) {
-      if (Math.random() < 0.10) obj.trampoline = true;
+      if (row === h - 1) { colTopY.set(bx, y); colTopRef.set(bx, obj); }
     }
   }
 
-  // Spawn potion only on single-height columns (no box stacked on top) — level 1+
-  const singleCols = [...colTop.entries()].filter(([, topY]) => topY === GROUND_Y - BOX_H);
-  if (!spawner.potionSpawned && Math.random() < 0.2 && singleCols.length > 0) {
-    const [bx] = singleCols[Math.floor(Math.random() * singleCols.length)];
+  if (level >= 2) {
+    for (const obj of colTopRef.values()) {
+      if (spawnRng() < 0.10) obj.trampoline = true;
+    }
+  }
+
+  const singleCols = [...colTopY.entries()].filter(([, y]) => y === GROUND_Y - BOX_H);
+  if (!spawner.potionSpawned && spawnRng() < 0.20 && singleCols.length > 0) {
+    const [bx] = singleCols[Math.floor(spawnRng() * singleCols.length)];
     potions.push({ x: bx + BOX_W / 2, y: GROUND_Y - BOX_H - 22 });
     spawner.potionSpawned = true;
   }
-  // Spawn rocket on any topmost column (~10% chance, max 1 solo / 2 two-player) — level 2+
+
   const rocketMax = twoPlayer ? 2 : 1;
-  if (level >= 2 && spawner.rocketCount < rocketMax && Math.random() < 0.10) {
-    const allCols = [...colTop.entries()];
+  if (level >= 2 && spawner.rocketCount < rocketMax && spawnRng() < 0.10) {
+    const allCols = [...colTopY.entries()];
     if (allCols.length > 0) {
-      const [bx, topY] = allCols[Math.floor(Math.random() * allCols.length)];
+      const [bx, topY] = allCols[Math.floor(spawnRng() * allCols.length)];
       rockets.push({ x: bx + BOX_W / 2, y: topY - 26 });
       spawner.rocketCount++;
     }
   }
 
-  // Place 1–2 diamonds on randomly chosen columns, always at the column's topmost box.
-  // 30% of diamonds float 40–100 px above the box (still reachable by jumping).
-  if (spawner.diamondBudget > 0 && Math.random() < 0.55) {
-    const cols     = [...colTop.entries()];
-    const count    = Math.min(spawner.diamondBudget, n >= 4 ? 2 : 1);
-    const shuffled = cols.sort(() => Math.random() - 0.5).slice(0, count);
+  if (spawner.diamondBudget > 0 && spawnRng() < 0.55) {
+    const cols     = [...colTopY.entries()];
+    const count    = Math.min(spawner.diamondBudget, heights.length >= 4 ? 2 : 1);
+    const shuffled = cols.sort(() => spawnRng() - 0.5).slice(0, count);
     for (const [bx, topY] of shuffled) {
-      const floatExtra = Math.random() < 0.3 ? 40 + Math.random() * 60 : 0;
+      const floatExtra = spawnRng() < 0.3 ? 40 + spawnRng() * 60 : 0;
       diamonds.push({ x: bx + BOX_W / 2, y: topY - 26 - floatExtra,
                       color: DIAMOND.box.color, pts: DIAMOND.box.pts });
       spawner.diamondBudget--;
     }
   }
+
+  return heights.length * BOX_W;
 }
 
-// Level 6: layers narrow by 2 per row (compact staircase), max 4 layers.
-function buildLayersL6(n) {
-  const layers = [];
-  for (let w = n; w >= 1 && layers.length < 4; w -= 2) layers.push(w);
-  return layers;
-}
-
-// Level 6: 2 fixed stepping stones + main pyramid cluster (max 4 layers).
-// Returns total spawned width for spawner.cd calc.
-function spawnLevel6Cluster() {
-  const x0 = W + 20;
-
-  // Stepping stone A — 2 wide, 2 high
-  for (let row = 0; row < 2; row++) {
-    const y = GROUND_Y - BOX_H * (row + 1);
-    for (let i = 0; i < 2; i++) {
-      obstacles.push({ x: x0 + i * BOX_W, y, w: BOX_W, h: BOX_H, type: 'box' });
-    }
-  }
-
-  // Stepping stone B — 2 wide, 3 high (1-box gap after A)
-  const stoneB = x0 + 3 * BOX_W;
-  for (let row = 0; row < 3; row++) {
-    const y = GROUND_Y - BOX_H * (row + 1);
-    for (let i = 0; i < 2; i++) {
-      obstacles.push({ x: stoneB + i * BOX_W, y, w: BOX_W, h: BOX_H, type: 'box' });
-    }
-  }
-
-  // Main cluster — 1-box gap after stone B; base width 4–7
-  const clx = x0 + 6 * BOX_W;
-  const n = 4 + Math.floor(Math.random() * 4); // 4–7 → 2–4 layers
-  const layers = buildLayersL6(n);
-  const colTop    = new Map();
-  const colTopRef = new Map();
-
-  layers.forEach((layerW, row) => {
-    const xOff = row * BOX_W; // 1-box horizontal offset per layer
-    const y    = GROUND_Y - BOX_H * (row + 1);
-    for (let i = 0; i < layerW; i++) {
-      const bx  = clx + xOff + i * BOX_W;
-      const obj = { x: bx, y, w: BOX_W, h: BOX_H, type: 'box' };
-      obstacles.push(obj);
-      if (!colTop.has(bx) || y < colTop.get(bx)) {
-        colTop.set(bx, y);
-        colTopRef.set(bx, obj);
-      }
-    }
-  });
-
-  // Trampolines on topmost boxes
-  for (const obj of colTopRef.values()) {
-    if (Math.random() < 0.10) obj.trampoline = true;
-  }
-
-  // Potion on single-height column of main cluster
-  const singleCols = [...colTop.entries()].filter(([, topY]) => topY === GROUND_Y - BOX_H);
-  if (!spawner.potionSpawned && Math.random() < 0.2 && singleCols.length > 0) {
-    const [px] = singleCols[Math.floor(Math.random() * singleCols.length)];
-    potions.push({ x: px + BOX_W / 2, y: GROUND_Y - BOX_H - 22 });
-    spawner.potionSpawned = true;
-  }
-
-  // Rocket on topmost column
-  const rocketMax = twoPlayer ? 2 : 1;
-  if (spawner.rocketCount < rocketMax && Math.random() < 0.10) {
-    const allCols = [...colTop.entries()];
-    if (allCols.length > 0) {
-      const [px, topY] = allCols[Math.floor(Math.random() * allCols.length)];
-      rockets.push({ x: px + BOX_W / 2, y: topY - 26 });
-      spawner.rocketCount++;
-    }
-  }
-
-  // Diamonds on topmost columns
-  if (spawner.diamondBudget > 0 && Math.random() < 0.55) {
-    const cols     = [...colTop.entries()];
-    const count    = Math.min(spawner.diamondBudget, 2);
-    const shuffled = cols.sort(() => Math.random() - 0.5).slice(0, count);
-    for (const [px, topY] of shuffled) {
-      diamonds.push({ x: px + BOX_W / 2, y: topY - 26,
-                      color: DIAMOND.box.color, pts: DIAMOND.box.pts });
-      spawner.diamondBudget--;
-    }
-  }
-
-  // Total width: stone A (2) + gap (1) + stone B (2) + gap (1) + cluster
-  const clusterW = (layers.length - 1) * BOX_W + layers[0] * BOX_W;
-  return 6 * BOX_W + clusterW;
-}
 
 // Returns total spawned width (step + gap + platform + upper tiers) for spawner.cd calc.
 function spawnPlatform(n) {
   const x0    = W + 20;
   const stepW = 2;                            // always 2 boxes wide (landable)
-  const stepH = Math.random() < 0.5 ? 1 : 2; // 1 or 2 boxes high
+  const stepH = spawnRng() < 0.5 ? 1 : 2; // 1 or 2 boxes high
   const gap   = BOX_W;                        // 1-box gap between step and platform
 
   // Stepping-stone boxes (normal brown boxes)
@@ -1491,8 +1453,8 @@ function spawnPlatform(n) {
   }
 
   // Rarely place a heart on this platform (max 1 per 2-level pair)
-  if (!heartSpawned && Math.random() < 0.25) {
-    const hx = platX + Math.floor(Math.random() * n) * BOX_W + BOX_W / 2;
+  if (!heartSpawned && spawnRng() < 0.25) {
+    const hx = platX + Math.floor(spawnRng() * n) * BOX_W + BOX_W / 2;
     hearts.push({ x: hx, y: PLATFORM_Y - 18 });
     heartSpawned = true;
   }
@@ -1503,15 +1465,15 @@ function spawnPlatform(n) {
   let prevN = n;
 
   for (const tier of PLATFORM_TIERS) {
-    if (Math.random() >= tier.spawnChance) break;
-    const tn   = tier.minN + Math.floor(Math.random() * (tier.maxN - tier.minN + 1));
-    const tgap = BOX_W + Math.floor(Math.random() * 2) * BOX_W;
+    if (spawnRng() >= tier.spawnChance) break;
+    const tn   = tier.minN + Math.floor(spawnRng() * (tier.maxN - tier.minN + 1));
+    const tgap = BOX_W + Math.floor(spawnRng() * 2) * BOX_W;
     const tx   = prevX + prevN * BOX_W + tgap;
     for (let i = 0; i < tn; i++) {
       obstacles.push({ x: tx + i * BOX_W, y: tier.y, w: BOX_W, h: BOX_H, type: 'platform' });
     }
-    if (Math.random() < tier.diaChance) {
-      const ri  = Math.floor(Math.random() * tn);
+    if (spawnRng() < tier.diaChance) {
+      const ri  = Math.floor(spawnRng() * tn);
       const def = DIAMOND[tier.diamond];
       diamonds.push({ x: tx + ri * BOX_W + BOX_W / 2, y: tier.y - 26,
                       color: def.color, pts: def.pts });
@@ -1578,6 +1540,7 @@ function fellIntoDitchP(p) {
   if (lives <= 0) {
     gs = 'gameover';
   } else {
+    restoreLevelSeed();
     initLevel();
     gs = 'playing';
   }
