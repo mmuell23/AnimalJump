@@ -164,6 +164,14 @@ const LEVEL_CFG = [
     sky1: '#070714', sky2: '#111128', ground: '#1a1a2a',
     sunColor: '#d0d0f0', sunGlow: 'rgba(200,200,255,',
     ditchWMin: 80, ditchWMax: 200 },
+  { speed: 7.0, lionRatio: 0.72, gapLo:  78, gapHi: 155,
+    sky1: '#C04800', sky2: '#F0C040', ground: '#C89030',
+    sunColor: '#FFEE00', sunGlow: 'rgba(255,230,0,',
+    ditchWMin: 80, ditchWMax: 200 },
+  { speed: 7.3, lionRatio: 0.82, gapLo:  75, gapHi: 150,
+    sky1: '#001228', sky2: '#023060', ground: '#D0E8F8',
+    sunColor: '#c0d8ff', sunGlow: 'rgba(160,200,255,',
+    ditchWMin: 80, ditchWMax: 200 },
 ];
 
 // ── Diamond type registry ──────────────────────────────────────────────────────
@@ -525,8 +533,8 @@ document.addEventListener('keydown', e => {
     if      (gs === 'levelend')                 advanceLevel();
     else if (gs === 'gameover' || gs === 'win') gs = 'select';
   }
-  // Dev shortcut: digit 1–5 → jump to that level with 3 lives
-  const digitMatch = e.code.match(/^Digit([1-6])$/);
+  // Dev shortcut: digit 1–8 → jump to that level with 3 lives
+  const digitMatch = e.code.match(/^Digit([1-8])$/);
   if (digitMatch) {
     level = parseInt(digitMatch[1]);
     lives = 3;
@@ -724,7 +732,7 @@ function initLevel() {
 }
 
 function advanceLevel() {
-  if (level >= 6) { gs = 'win'; return; }
+  if (level >= LEVEL_CFG.length) { gs = 'win'; return; }
   level++;
   freshLevelSeed();
   initLevel();
@@ -1364,7 +1372,7 @@ function chooseMaxHeight() {
   if (level <= 2) return r < 0.35 ? 2 : 1;
   if (level <= 4) return r < 0.35 ? 1 : r < 0.70 ? 2 : 3;
   if (level === 5) return r < 0.20 ? 1 : r < 0.55 ? 2 : 3;
-  return r < 0.15 ? 2 : r < 0.50 ? 3 : 4; // level 6
+  return r < 0.15 ? 2 : r < 0.50 ? 3 : 4; // level 6+
 }
 
 // Returns column-height array for one contiguous block.
@@ -1626,7 +1634,7 @@ function draw() {
 
   if (gs === 'levelend') {
     drawOverlay(`🎉 Level ${level} geschafft!`,
-      level >= 6 ? '▶ Weiter' : `▶ Level ${level + 1}`,
+      level >= LEVEL_CFG.length ? '▶ Weiter' : `▶ Level ${level + 1}`,
       `Punkte: ${score}`);
   } else if (gs === 'gameover') {
     drawOverlay('💀 Game Over', '🔄 Nochmal spielen',
@@ -1656,6 +1664,31 @@ function drawBackground() {
     ctx.beginPath(); ctx.arc(moonX, moonY, 26, 0, Math.PI * 2); ctx.fill();
     // Scrolling skyscrapers (behind everything)
     drawSkyscrapers();
+  } else if (level === 7) {
+    // Desert: blazing sun with intense glow, heat-haze clouds, sand dunes, cacti
+    const sunX = W - 80, sunY = 58;
+    for (let i = 6; i >= 1; i--) {
+      ctx.fillStyle = cfg.sunGlow + (0.07 * i) + ')';
+      ctx.beginPath();
+      ctx.arc(sunX, sunY, 32 + i * 13, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.fillStyle = cfg.sunColor;
+    ctx.beginPath();
+    ctx.arc(sunX, sunY, 32, 0, Math.PI * 2);
+    ctx.fill();
+    for (const c of clouds) drawCloud(c.x, c.y, c.r, true);
+    drawDesert();
+  } else if (level >= 8) {
+    // North Pole: aurora borealis, pale moon, snow drifts
+    const moonX = W - 80, moonY = 58;
+    ctx.fillStyle = 'rgba(180,210,255,0.10)';
+    ctx.beginPath(); ctx.arc(moonX, moonY, 46, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = 'rgba(200,225,255,0.20)';
+    ctx.beginPath(); ctx.arc(moonX, moonY, 36, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#e8f0ff';
+    ctx.beginPath(); ctx.arc(moonX, moonY, 26, 0, Math.PI * 2); ctx.fill();
+    drawNorthPole();
   } else {
     // Sun glow — layered circles instead of shadowBlur (no GPU flicker)
     const sunX = W - 80, sunY = 58;
@@ -1785,6 +1818,90 @@ function drawSkyscrapers() {
           ctx.fillRect(bx + 4 + c * wgx, by + 12 + r * wgy, ww, wh);
         }
       }
+    }
+  }
+}
+
+// ── Desert background (level 7) ──────────────────────────────────────────────
+const DESERT_CACTI = [
+  { dx:  55, h: 82, armH: 32, armY: 50 },
+  { dx: 195, h: 66, armH: 26, armY: 40 },
+  { dx: 355, h: 90, armH: 36, armY: 56 },
+  { dx: 515, h: 74, armH: 28, armY: 45 },
+  { dx: 675, h: 86, armH: 33, armY: 53 },
+  { dx: 830, h: 70, armH: 27, armY: 43 },
+];
+
+function drawDesert() {
+  const scroll = (hillOff * 0.40) % W;
+  // Sand dunes
+  ctx.fillStyle = 'rgba(200,140,30,0.30)';
+  for (let rep = -1; rep <= 1; rep++) {
+    for (let i = 0; i < 5; i++) {
+      const x = (i * 210 + 90) - scroll + rep * W;
+      ctx.beginPath();
+      ctx.arc(x, GROUND_Y, 115, Math.PI, 0);
+      ctx.fill();
+    }
+  }
+  // Cacti
+  for (let rep = -1; rep <= 1; rep++) {
+    for (const c of DESERT_CACTI) {
+      const cx = c.dx - scroll + rep * W;
+      if (cx + 40 < 0 || cx - 40 > W) continue;
+      ctx.fillStyle = '#2a6030';
+      // Trunk
+      ctx.fillRect(cx - 5, GROUND_Y - c.h, 10, c.h);
+      // Left arm (horizontal + vertical)
+      ctx.fillRect(cx - 24, GROUND_Y - c.armY - 8, 20, 8);
+      ctx.fillRect(cx - 24, GROUND_Y - c.armY - c.armH, 8, c.armH);
+      // Right arm
+      ctx.fillRect(cx + 4,  GROUND_Y - c.armY - 8, 20, 8);
+      ctx.fillRect(cx + 16, GROUND_Y - c.armY - c.armH, 8, c.armH);
+    }
+  }
+}
+
+// ── North Pole background (level 8) ──────────────────────────────────────────
+function drawNorthPole() {
+  // Stars
+  for (let i = 0; i < 45; i++) {
+    const sx = (i * 239 + 17) % W;
+    const sy = (i * 83 + 13) % Math.round(GROUND_Y * 0.6);
+    ctx.fillStyle = `rgba(210,235,255,${0.25 + (i % 3) * 0.15})`;
+    ctx.beginPath();
+    ctx.arc(sx, sy, (i % 5 === 0) ? 1.5 : 0.8, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // Aurora borealis — wavy semi-transparent bands
+  const aScroll = hillOff * 0.18;
+  const bands = [
+    { y: 75,  h: 38, r: 30, g: 200, b: 120, amp: 16, freq: 0.012 },
+    { y: 108, h: 28, r: 40, g: 175, b: 220, amp: 12, freq: 0.016 },
+    { y: 135, h: 18, r: 110, g: 50, b: 190, amp:  8, freq: 0.020 },
+  ];
+  for (const band of bands) {
+    ctx.beginPath();
+    ctx.moveTo(0, band.y);
+    for (let x = 0; x <= W; x += 6) {
+      ctx.lineTo(x, band.y + Math.sin((x + aScroll) * band.freq) * band.amp);
+    }
+    for (let x = W; x >= 0; x -= 6) {
+      ctx.lineTo(x, band.y + band.h + Math.sin((x + aScroll) * band.freq + 1.2) * band.amp);
+    }
+    ctx.closePath();
+    ctx.fillStyle = `rgba(${band.r},${band.g},${band.b},0.32)`;
+    ctx.fill();
+  }
+  // Snow drifts
+  const sScroll = (hillOff * 0.30) % W;
+  ctx.fillStyle = 'rgba(220,238,255,0.22)';
+  for (let rep = -1; rep <= 1; rep++) {
+    for (let i = 0; i < 6; i++) {
+      const x = (i * 185 + 60) - sScroll + rep * W;
+      ctx.beginPath();
+      ctx.arc(x, GROUND_Y, 68, Math.PI, 0);
+      ctx.fill();
     }
   }
 }

@@ -33,7 +33,7 @@ BOX_W = 44, BOX_H = 46
 
 ## Konfigurationsobjekte
 
-### `LEVEL_CFG[0..5]` — 6 Level
+### `LEVEL_CFG[0..7]` — 8 Level
 
 Pro Level: `speed`, `lionRatio`, `gapLo/Hi`, `ditchWMin/Max`, Sky-/Bodenfarben.
 
@@ -45,11 +45,23 @@ Pro Level: `speed`, `lionRatio`, `gapLo/Hi`, `ditchWMin/Max`, Sky-/Bodenfarben.
 | 4 | 6.5 | 0.48 | Roter Himmel |
 | 5 | 7.0 | 0.50 | Etwas leichter; Graben-Rate halbiert; Sanduhr-Collectible |
 | 6 | 7.0 | 0.62 | Gleiche Geschwindigkeit wie L5; Nacht-Stadtsilhouette; spezielle Kisten-Cluster |
+| 7 | 7.0 | 0.72 | Gleiche Geschwindigkeit wie L6; Wüstenlandschaft; brennende Sonne; Sanddünen; Kakteen |
+| 8 | 7.3 | 0.82 | Etwas schneller; Nordpol-Nacht; Aurora Borealis; Mondlicht; Schneedünen |
 
 > **Level 6 – Besonderheiten:**
 > - Hintergrund: scrollende Hochhaus-Silhouetten mit Fenstern (`drawSkyscrapers()`), Mond statt Sonne.
 > - Kasten-Cluster: max. 4 Spalten hoch; Stepping-Stone-Profil (Aufstieg → Peak → Abstieg), erzeugt via `chooseMaxHeight()` + `generateBoxBlock()`.
-> - HUD zeigt `Level X / 6` (automatisch aus `LEVEL_CFG.length`).
+> - HUD zeigt `Level X / 8` (automatisch aus `LEVEL_CFG.length`).
+
+> **Level 7 – Besonderheiten:**
+> - Hintergrund: `drawDesert()` — Sanddünen (scrollend, Parallax 0.40), Kakteen-Silhouetten (`DESERT_CACTI`-Kachel), lodernde Sonne mit 6 Glow-Ringen.
+> - Hitzeschlieren-Wolken (wie Level 4-Wolken: dunkel getönt).
+> - Kasten-Cluster: gleiche Verteilung wie Level 6 (50 % → 4, 35 % → 3, 15 % → 2).
+
+> **Level 8 – Besonderheiten:**
+> - Hintergrund: `drawNorthPole()` — Sternenhimmel, Aurora Borealis (3 wellige Bänder in Grün/Cyan/Lila), Schneedünen, blasser Mond.
+> - Boden: Eisblau-Weiß (`#D0E8F8`).
+> - Kasten-Cluster: gleiche Verteilung wie Level 6+7.
 
 ### `DIAMOND`
 Zentrales Registry für alle Diamant-Typen. **Hier anpassen, nicht an einzelnen Spawn-Stellen.**
@@ -198,14 +210,16 @@ update()
 
 Wahrscheinlichkeiten je Frame:
 
-| Typ | Bedingung |
-|---|---|
-| Graben (ditch) | 22 % (Level 1–4) / 11 % (Level 5–6) |
-| Löwe | `lionRatio * 0.6`, nicht nach Gegner |
-| Geier | `lionRatio * 0.4`, nicht nach Gegner (Level 2+) |
-| Känguru | anteilig, nicht nach Gegner (Level 3+) |
-| Plattform | 52 % (2P) / 35 % (1P) des verbleibenden Anteils |
-| Kasten-Cluster | Rest — alle Level via `spawnBoxCluster()` |
+| Typ | Formel | L1 | L2 | L3 | L4 | L5 | L6 | L7 | L8 |
+|---|---|---|---|---|---|---|---|---|---|
+| Graben (ditch) | 22 % (L1–4), 11 % (L5+) | 22 % | 22 % | 22 % | 22 % | 11 % | 11 % | 11 % | 11 % |
+| Löwe | `enemyTotal × (L3+: 0.38, L2: 0.57, L1: 1.00)` | 9 % | 10 % | 10 % | 14 % | 17 % | 21 % | 24 % | 28 % |
+| Geier | `enemyTotal × (L3+: 0.28, L2: 0.43)` (L2+) | — | 7 % | 8 % | 10 % | 12 % | 15 % | 18 % | 20 % |
+| Känguru | `enemyTotal × 0.34` (L3+) | — | — | 9 % | 13 % | 15 % | 19 % | 22 % | 25 % |
+| Plattform | 52 % (2P) / 35 % (1P) des verbleibenden Anteils | | | | | | | | |
+| Kasten-Cluster | Rest — alle Level via `spawnBoxCluster()` | | | | | | | | |
+
+> `enemyTotal = lionRatio × (1 − ditchProb)`. Alle Prozentzahlen gerundet.
 
 Nach einem Gegner: Mindestabstand 340 px (damit Stomp-Bounce sicher landet).
 
@@ -214,7 +228,7 @@ Nach einem Gegner: Mindestabstand 340 px (damit Stomp-Bounce sicher landet).
 Position-basierter Check: `lastBoxRight > spawnX - minGapPx` (wobei `lastBoxRight` das Rechts-Ende des letzten Kasten-Hindernisses via `obstacles.reduce` ist).
 
 - Level 1–5: `minGapPx = 2 * BOX_W`
-- Level 6: `minGapPx = 5 * BOX_W`
+- Level 6+: `minGapPx = 5 * BOX_W`
 
 Ist der Abstand zu gering, wird statt eines Kasten-Clusters eine Plattform gespawnt.
 
