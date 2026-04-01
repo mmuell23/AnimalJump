@@ -110,11 +110,12 @@ starsBg.width = W; starsBg.height = H;
 
 // ── Data ──────────────────────────────────────────────────────────────────────
 const ANIMALS = [
-  { name: 'Fuchs'  },
-  { name: 'Hund'   },
-  { name: 'Katze'  },
-  { name: 'Esel'   },
-  { name: 'Wolf'   },
+  { name: 'Fuchs'    },
+  { name: 'Hund'     },
+  { name: 'Katze'    },
+  { name: 'Esel'     },
+  { name: 'Wolf'     },
+  { name: 'Maulwurf' },
 ];
 const ANIMAL_ABILITIES = [
   '↑ Doppelsprung',
@@ -122,6 +123,7 @@ const ANIMAL_ABILITIES = [
   '↓ Wollknäuel',
   '↓+Spr. Kiste +25',
   '↓ Schattenwolf',
+  '10× durch Kisten',
 ];
 // Hint lines shown in-game at level start [jumpKey, moveKeys, abilityLine]
 const ANIMAL_HINT = [
@@ -130,9 +132,10 @@ const ANIMAL_HINT = [
   ['Springen', 'Laufen', '↓: Wollknäuel schießen'],
   ['Springen', 'Laufen', '↓+Sprung auf Kiste: +25'],
   ['Springen', 'Laufen', '↓: Schattenwolf rufen'],
+  ['Springen', 'Laufen', 'Läuft durch Kisten!'],
 ];
 // Main body color per animal — used to tint the rocket sprite
-const ANIMAL_COLORS = ['#E55A15', '#C48B2F', '#888888', '#B8B8B8', '#607080'];
+const ANIMAL_COLORS = ['#E55A15', '#C48B2F', '#888888', '#B8B8B8', '#607080', '#5C4033'];
 
 // ditchWMax = 70% of max jump distance (speed × airtime ~46 frames) → always crossable
 // gapLo/Hi: pixel gap between spawned elements (converted to frames via /speed)
@@ -192,6 +195,8 @@ let gScroll     = 0;
 let hillOff     = 0;
 let flashFrames = 0;
 let greenFrames = 0;
+let skyGradient = null; // cached per level, recreated in initLevel
+const effCfg = {}; // reusable object for speed-multiplied config (avoids per-frame allocation)
 let introFrames = 0;
 let players     = [];
 let obstacles   = [];
@@ -244,6 +249,8 @@ const MB = (() => {
 
 // Map touch.identifier → button name currently held by that finger
 const activeTouches = new Map();
+// Set of currently pressed button names — O(1) lookup for drawMobileButtons
+const pressedButtons = new Set();
 
 function getTouchedBtn(cx, cy) {
   for (const [name, b] of Object.entries(MB)) {
@@ -286,6 +293,8 @@ function makePlayer(x, animalIdx) {
     wolfCooldown: 0,      // wolf: frames until howl is ready again
     donkeyBoxCount: 0,    // donkey: boxes destroyed since last cooldown
     donkeyBoxCD: 0,       // donkey: frames until ground-pound is ready again
+    moleBoxes: 5,         // mole: remaining box run-throughs (refills after cooldown)
+    moleCooldown: 0,      // mole: frames until next refill (600 = 10 s)
   };
 }
 
@@ -569,7 +578,7 @@ canvas.addEventListener('touchstart', e => {
   for (const t of e.changedTouches) {
     const { cx, cy } = toCanvasCoords(t);
     const btn = getTouchedBtn(cx, cy);
-    if (btn) { activeTouches.set(t.identifier, btn); pressBtn(btn); }
+    if (btn) { activeTouches.set(t.identifier, btn); pressedButtons.add(btn); pressBtn(btn); }
   }
 }, { passive: false });
 
@@ -581,8 +590,8 @@ canvas.addEventListener('touchmove', e => {
     const { cx, cy } = toCanvasCoords(t);
     const next = getTouchedBtn(cx, cy);
     if (prev === next) continue;
-    if (prev) releaseBtn(prev);
-    if (next) { activeTouches.set(t.identifier, next); pressBtn(next); }
+    if (prev) { pressedButtons.delete(prev); releaseBtn(prev); }
+    if (next) { activeTouches.set(t.identifier, next); pressedButtons.add(next); pressBtn(next); }
     else activeTouches.delete(t.identifier);
   }
 }, { passive: false });
@@ -595,7 +604,7 @@ function endTouches(e) {
   }
   for (const t of e.changedTouches) {
     const btn = activeTouches.get(t.identifier);
-    if (btn) { releaseBtn(btn); activeTouches.delete(t.identifier); }
+    if (btn) { pressedButtons.delete(btn); releaseBtn(btn); activeTouches.delete(t.identifier); }
   }
 }
 canvas.addEventListener('touchend',    endTouches, { passive: false });
@@ -606,7 +615,7 @@ function handleUIClick(mx, my) {
   if (gs === 'gameover' || gs === 'win')     { gs = 'select'; return; }
   if (gs === 'select') {
     const p1cards = getCardRects(SEL_P1_Y);
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < ANIMALS.length; i++) {
       const c = p1cards[i];
       if (mx >= c.x && mx <= c.x + c.w && my >= c.y && my <= c.y + c.h) {
         selAnimal = i; return;
@@ -614,7 +623,7 @@ function handleUIClick(mx, my) {
     }
     if (!isMobile) {
       const p2cards = getCardRects(SEL_P2_Y);
-      for (let i = 0; i < 5; i++) {
+      for (let i = 0; i < ANIMALS.length; i++) {
         const c = p2cards[i];
         if (mx >= c.x && mx <= c.x + c.w && my >= c.y && my <= c.y + c.h) {
           selAnimal2 = i; return;
@@ -642,7 +651,7 @@ function handleUIClick(mx, my) {
 // ── Layout helpers ────────────────────────────────────────────────────────────
 // Combined select screen row positions
 const SEL_CW   = 86, SEL_CH = 96, SEL_CGAP = 12;
-const SEL_SX   = (W - (5 * SEL_CW + 4 * SEL_CGAP)) / 2;
+const SEL_SX   = (W - (ANIMALS.length * SEL_CW + (ANIMALS.length - 1) * SEL_CGAP)) / 2;
 const SEL_P1_Y = 88;
 const SEL_P2_Y = 210;
 const SEL_BTN_Y = 328;
@@ -672,7 +681,7 @@ function startGame() {
 }
 
 function initLevel() {
-  activeTouches.clear();
+  activeTouches.clear(); pressedButtons.clear();
   frame       = 0;
   gScroll     = 0;
   hillOff     = 0;
@@ -694,6 +703,10 @@ function initLevel() {
   hourglassFrames = 0;
   popups     = [];
   if (level % 2 === 1) heartSpawned = false;
+  const _scfg = LEVEL_CFG[level - 1];
+  skyGradient = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+  skyGradient.addColorStop(0, _scfg.sky1);
+  skyGradient.addColorStop(1, _scfg.sky2);
   spawner = {
     cd: 160,
     lastType: '',
@@ -731,7 +744,16 @@ function update() {
   let speedMult = 1 + rocketFade;
   if (clockFrames     > 0) speedMult *= 1.5;
   if (hourglassFrames > 0) speedMult *= 0.5;
-  const eff = speedMult !== 1 ? { ...cfg, speed: cfg.speed * speedMult } : cfg;
+  let eff;
+  if (speedMult !== 1) {
+    // Reuse effCfg object — copy only what changes to avoid GC pressure
+    if (effCfg.speed === undefined) Object.assign(effCfg, cfg); // first-time init
+    else if (effCfg.gapLo !== cfg.gapLo) Object.assign(effCfg, cfg); // level changed
+    effCfg.speed = cfg.speed * speedMult;
+    eff = effCfg;
+  } else {
+    eff = cfg;
+  }
 
   gScroll = (gScroll + eff.speed) % 50;
   hillOff += eff.speed * 0.3;
@@ -764,115 +786,116 @@ function updateWorld(cfg) {
   // Timers
   if (flashFrames > 0) flashFrames--;
   if (greenFrames > 0) greenFrames--;
-  // Floating popups
-  for (const pp of popups) { pp.y -= 1.5; pp.life--; }
-  popups = popups.filter(pp => pp.life > 0);
-  // Move & cull obstacles/ditches
-  for (const o of obstacles) o.x -= cfg.speed;
-  obstacles = obstacles.filter(o => o.x > -200);
-  for (const d of ditches) d.x -= cfg.speed;
-  ditches = ditches.filter(d => d.x + d.w > -10);
-  // Explosion particles
-  for (const pt of particles) { pt.x += pt.vx; pt.y += pt.vy; pt.vy += 0.25; pt.life--; }
-  particles = particles.filter(pt => pt.life > 0);
+  // Floating popups — move and cull in one pass (no new array)
+  for (let i = popups.length - 1; i >= 0; i--) {
+    const pp = popups[i];
+    pp.y -= 1.5; pp.life--;
+    if (pp.life <= 0) popups.splice(i, 1);
+  }
+  // Move & cull obstacles/ditches — in-place, no filter allocation
+  for (let i = obstacles.length - 1; i >= 0; i--) {
+    obstacles[i].x -= cfg.speed;
+    if (obstacles[i].x <= -200) obstacles.splice(i, 1);
+  }
+  for (let i = ditches.length - 1; i >= 0; i--) {
+    const d = ditches[i];
+    d.x -= cfg.speed;
+    if (d.x + d.w <= -10) ditches.splice(i, 1);
+  }
+  // Explosion particles — move and cull in one pass
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const pt = particles[i];
+    pt.x += pt.vx; pt.y += pt.vy; pt.vy += 0.25; pt.life--;
+    if (pt.life <= 0) particles.splice(i, 1);
+  }
 }
 
 function updateCollectibles(cfg) {
-  for (const h of hearts) h.x -= cfg.speed;
-  hearts = hearts.filter(h => {
-    if (h.x < -20) return false;
+  const halfP = PLAYER_SIZE / 2;
+  for (let i = hearts.length - 1; i >= 0; i--) {
+    const h = hearts[i];
+    h.x -= cfg.speed;
+    if (h.x < -20) { hearts.splice(i, 1); continue; }
     for (const p of players) {
-      if (Math.abs(p.x - h.x) < PLAYER_SIZE / 2 + 10 &&
-          Math.abs((p.y - PLAYER_SIZE / 2) - h.y) < PLAYER_SIZE / 2 + 10) {
+      if (Math.abs(p.x - h.x) < halfP + 10 && Math.abs((p.y - halfP) - h.y) < halfP + 10) {
         lives = Math.min(lives + 1, 9);
         greenFrames = 14;
         playHeart();
         popups.push({ x: h.x, y: h.y - 10, text: '❤️ +1', life: 80, color: '#ff4488' });
-        return false;
+        hearts.splice(i, 1); break;
       }
     }
-    return true;
-  });
+  }
 
-  for (const ro of rockets) ro.x -= cfg.speed;
-  rockets = rockets.filter(ro => {
-    if (ro.x < -20) return false;
+  for (let i = rockets.length - 1; i >= 0; i--) {
+    const ro = rockets[i];
+    ro.x -= cfg.speed;
+    if (ro.x < -20) { rockets.splice(i, 1); continue; }
     for (const p of players) {
-      if (Math.abs(p.x - ro.x) < PLAYER_SIZE / 2 + 10 &&
-          Math.abs((p.y - PLAYER_SIZE / 2) - ro.y) < PLAYER_SIZE / 2 + 10) {
-        for (const pl of players) {
-          pl.rocketFrames = 600; // 10 seconds for all players
-          pl.floatFrames  = 0;
-        }
+      if (Math.abs(p.x - ro.x) < halfP + 10 && Math.abs((p.y - halfP) - ro.y) < halfP + 10) {
+        for (const pl of players) { pl.rocketFrames = 600; pl.floatFrames = 0; }
         playRocket();
         popups.push({ x: ro.x, y: ro.y - 10, text: '🚀 Start!', life: 90, color: '#ff9944' });
-        return false;
+        rockets.splice(i, 1); break;
       }
     }
-    return true;
-  });
+  }
 
-  for (const po of potions) po.x -= cfg.speed;
-  potions = potions.filter(po => {
-    if (po.x < -20) return false;
+  for (let i = potions.length - 1; i >= 0; i--) {
+    const po = potions[i];
+    po.x -= cfg.speed;
+    if (po.x < -20) { potions.splice(i, 1); continue; }
     for (const p of players) {
-      if (Math.abs(p.x - po.x) < PLAYER_SIZE / 2 + 10 &&
-          Math.abs((p.y - PLAYER_SIZE / 2) - po.y) < PLAYER_SIZE / 2 + 10) {
+      if (Math.abs(p.x - po.x) < halfP + 10 && Math.abs((p.y - halfP) - po.y) < halfP + 10) {
         p.floatFrames = 450;
         playPotion();
         popups.push({ x: po.x, y: po.y - 10, text: '✨ Schweben!', life: 90, color: '#80ff80' });
-        return false;
+        potions.splice(i, 1); break;
       }
     }
-    return true;
-  });
+  }
 
-  // Clock collectibles
-  for (const c of clocks) c.x -= cfg.speed;
-  clocks = clocks.filter(c => {
-    if (c.x < -20) return false;
+  for (let i = clocks.length - 1; i >= 0; i--) {
+    const c = clocks[i];
+    c.x -= cfg.speed;
+    if (c.x < -20) { clocks.splice(i, 1); continue; }
     for (const p of players) {
-      if (Math.abs(p.x - c.x) < PLAYER_SIZE / 2 + 14 &&
-          Math.abs((p.y - PLAYER_SIZE / 2) - c.y) < PLAYER_SIZE / 2 + 14) {
-        clockFrames = 600; // 10 seconds
+      if (Math.abs(p.x - c.x) < halfP + 14 && Math.abs((p.y - halfP) - c.y) < halfP + 14) {
+        clockFrames = 600;
         playPotion();
         popups.push({ x: c.x, y: c.y - 10, text: '⚡ 1.5× Tempo!', life: 90, color: '#ffcc00' });
-        return false;
+        clocks.splice(i, 1); break;
       }
     }
-    return true;
-  });
+  }
 
-  // Hourglass collectibles
-  for (const h of hourglasses) h.x -= cfg.speed;
-  hourglasses = hourglasses.filter(h => {
-    if (h.x < -20) return false;
+  for (let i = hourglasses.length - 1; i >= 0; i--) {
+    const h = hourglasses[i];
+    h.x -= cfg.speed;
+    if (h.x < -20) { hourglasses.splice(i, 1); continue; }
     for (const p of players) {
-      if (Math.abs(p.x - h.x) < PLAYER_SIZE / 2 + 14 &&
-          Math.abs((p.y - PLAYER_SIZE / 2) - h.y) < PLAYER_SIZE / 2 + 14) {
-        hourglassFrames = 900; // 15 seconds
+      if (Math.abs(p.x - h.x) < halfP + 14 && Math.abs((p.y - halfP) - h.y) < halfP + 14) {
+        hourglassFrames = 900;
         playPotion();
         popups.push({ x: h.x, y: h.y - 10, text: '🐢 Zeitlupe!', life: 90, color: '#88aaff' });
-        return false;
+        hourglasses.splice(i, 1); break;
       }
     }
-    return true;
-  });
+  }
 
-  for (const d of diamonds) d.x -= cfg.speed;
-  diamonds = diamonds.filter(d => {
-    if (d.x < -20) return false;
+  for (let i = diamonds.length - 1; i >= 0; i--) {
+    const d = diamonds[i];
+    d.x -= cfg.speed;
+    if (d.x < -20) { diamonds.splice(i, 1); continue; }
     for (const p of players) {
-      if (Math.abs(p.x - d.x) < PLAYER_SIZE / 2 + 6 &&
-          Math.abs((p.y - PLAYER_SIZE / 2) - d.y) < PLAYER_SIZE / 2 + 6) {
+      if (Math.abs(p.x - d.x) < halfP + 6 && Math.abs((p.y - halfP) - d.y) < halfP + 6) {
         addScore(d.pts);
         playPling();
         popups.push({ x: d.x, y: d.y - 10, text: `+${d.pts}`, life: 45, color: d.color });
-        return false;
+        diamonds.splice(i, 1); break;
       }
     }
-    return true;
-  });
+  }
 }
 
 function updateEnemies(cfg) {
@@ -987,7 +1010,16 @@ function updateCollisions() {
         if (o.type === 'flag' || o.type === 'platform') continue;
         if (!overlaps(p, o)) continue;
         if (o.type === 'box') {
-          if (p.vy >= 0 && p.y > o.y + 5) hitP(p, o);
+          if (p.vy >= 0 && p.y > o.y + 5) {
+            if (p.animalIdx === 5 && p.moleBoxes > 0) {
+              // Mole runs through box horizontally — destroy it, no damage
+              explodeBox(o);
+              p.moleBoxes--;
+              if (p.moleBoxes === 0) p.moleCooldown = 600; // 10 s cooldown then refill
+            } else {
+              hitP(p, o);
+            }
+          }
         } else if (o.type === 'lion') {
           if ((!p.onGround && p.vy > 0) || o.frozenFrames > 0) stompP(p, o, 100); else hitP(p, o);
         } else if (o.type === 'vulture') {
@@ -1166,6 +1198,7 @@ function updatePlayer(p, cfg) {
   if (p.scratchCooldown > 0) p.scratchCooldown--;
   if (p.donkeyBoxCD    > 0) p.donkeyBoxCD--;
   if (p.wolfCooldown   > 0) p.wolfCooldown--;
+  if (p.moleCooldown   > 0) { p.moleCooldown--; if (p.moleCooldown === 0) p.moleBoxes = 5; }
 
   if (p.animalIdx === 1 && p.barkCooldown === 0 && p.floatFrames === 0 && p.rocketFrames === 0 && _dnKeySa) {
     // Dog bark: freeze all visible enemies for 90 frames
@@ -1188,7 +1221,7 @@ function updatePlayer(p, cfg) {
   if (p.animalIdx === 4 && p.wolfCooldown === 0 && p.floatFrames === 0 && p.rocketFrames === 0 && _dnKeySa) {
     // Wolf howl: summon shadow wolf that sweeps the screen from right to left
     shadowWolves.push({ x: W + 58, y: GROUND_Y, w: 58, h: 62, owner: p });
-    p.wolfCooldown = 480;
+    p.wolfCooldown = 288;
     playPunch();
     popups.push({ x: p.x, y: p.y - 50, text: 'AUUU!', life: 60, color: '#ccccff' });
   }
@@ -1342,8 +1375,17 @@ function generateBoxBlock(maxH) {
     const w = 1 + Math.floor(spawnRng() * 5);
     for (let i = 0; i < w; i++) cols.push(1);
   } else if (maxH === 2) {
-    const w = 2 + Math.floor(spawnRng() * 5);
-    for (let i = 0; i < w; i++) cols.push(spawnRng() < 0.55 ? 2 : 1);
+    // Groups of h=2 separated by gaps ≥2 h=1 columns (single-column gaps are unreachable)
+    if (spawnRng() < 0.4) cols.push(1);               // optional leading h=1
+    const run1 = 1 + Math.floor(spawnRng() * 3);      // first h=2 run: 1–3 columns
+    for (let i = 0; i < run1; i++) cols.push(2);
+    if (spawnRng() < 0.5) {                            // optional second h=2 group
+      const gap = 2 + Math.floor(spawnRng() * 2);     // gap ≥2 h=1 columns
+      for (let i = 0; i < gap; i++) cols.push(1);
+      const run2 = 1 + Math.floor(spawnRng() * 3);
+      for (let i = 0; i < run2; i++) cols.push(2);
+    }
+    if (spawnRng() < 0.35) cols.push(1);              // optional trailing h=1
   } else if (maxH === 3) {
     // 2 stepping stones h=1, optional 2×h=2, peak, optional descent
     cols.push(1, 1);
@@ -1570,12 +1612,16 @@ function draw() {
 
   // Screen flash effects
   if (flashFrames > 0) {
-    ctx.fillStyle = `rgba(255,0,0,${flashFrames * 0.045})`;
+    ctx.globalAlpha = flashFrames * 0.045;
+    ctx.fillStyle = '#ff0000';
     ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 1;
   }
   if (greenFrames > 0) {
-    ctx.fillStyle = `rgba(0,220,80,${Math.min(0.13, greenFrames * 0.006)})`;
+    ctx.globalAlpha = Math.min(0.13, greenFrames * 0.006);
+    ctx.fillStyle = '#00dc50';
     ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 1;
   }
 
   if (gs === 'levelend') {
@@ -1595,11 +1641,8 @@ function draw() {
 function drawBackground() {
   const cfg = LEVEL_CFG[level - 1];
 
-  // Sky gradient
-  const sg = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
-  sg.addColorStop(0, cfg.sky1);
-  sg.addColorStop(1, cfg.sky2);
-  ctx.fillStyle = sg;
+  // Sky gradient (cached in initLevel, no per-frame allocation)
+  ctx.fillStyle = skyGradient;
   ctx.fillRect(0, 0, W, GROUND_Y);
 
   if (level === 6) {
@@ -1650,9 +1693,8 @@ function drawBackground() {
   // Ground — drawn in segments, with gaps for ditches
   ctx.fillStyle = cfg.ground;
   let gx = 0;
-  // Sort ditches left→right so segments are correct
-  const sortedDitches = [...ditches].sort((a, b) => a.x - b.x);
-  for (const d of sortedDitches) {
+  // Ditches are already in left→right order (spawned sequentially, scrolled at same speed)
+  for (const d of ditches) {
     const dx = Math.max(0, d.x);
     if (dx > gx) ctx.fillRect(gx, GROUND_Y, dx - gx, H - GROUND_Y);
     gx = Math.min(W, d.x + d.w);
@@ -1660,7 +1702,7 @@ function drawBackground() {
   if (gx < W) ctx.fillRect(gx, GROUND_Y, W - gx, H - GROUND_Y);
 
   // Ditch: dark abyss + glowing floor + edge walls
-  for (const d of sortedDitches) {
+  for (const d of ditches) {
     const dx = Math.max(0, d.x);
     const dw = Math.min(W, d.x + d.w) - dx;
     if (dw <= 0) continue;
@@ -1685,7 +1727,7 @@ function drawBackground() {
   // Ground top edge line
   ctx.fillStyle = 'rgba(0,0,0,0.18)';
   gx = 0;
-  for (const d of sortedDitches) {
+  for (const d of ditches) {
     const dx = Math.max(0, d.x);
     if (dx > gx) ctx.fillRect(gx, GROUND_Y, dx - gx, 4);
     gx = Math.min(W, d.x + d.w);
@@ -2320,51 +2362,56 @@ function drawVulture(o) {
 
 // ── Obstacles ─────────────────────────────────────────────────────────────────
 function drawObstacles() {
+  // Box gradients created once per frame (reused for all boxes via translate)
+  const _boxNormGrad = ctx.createLinearGradient(0, 0, BOX_W, BOX_H);
+  _boxNormGrad.addColorStop(0, '#C87941');
+  _boxNormGrad.addColorStop(1, '#7A4420');
+  const _boxTramGrad = ctx.createLinearGradient(0, 0, BOX_W, BOX_H);
+  _boxTramGrad.addColorStop(0, '#FF88BB');
+  _boxTramGrad.addColorStop(1, '#CC1166');
+
   for (const o of obstacles) {
     if (o.type === 'box') {
       // Drop shadow
       ctx.fillStyle = 'rgba(0,0,0,0.22)';
       ctx.fillRect(o.x + 5, o.y + o.h, o.w, 6);
 
+      ctx.save();
+      ctx.translate(o.x, o.y);
       if (o.trampoline) {
         // ── Trampolin-Kiste (rosa) ──────────────────────────────────────────
-        const bg = ctx.createLinearGradient(o.x, o.y, o.x + o.w, o.y + o.h);
-        bg.addColorStop(0, '#FF88BB');
-        bg.addColorStop(1, '#CC1166');
-        ctx.fillStyle = bg;
-        ctx.fillRect(o.x, o.y, o.w, o.h);
+        ctx.fillStyle = _boxTramGrad;
+        ctx.fillRect(0, 0, o.w, o.h);
         // Spring coils
         ctx.strokeStyle = '#FF44AA';
         ctx.lineWidth = 1.5;
         for (let si = 1; si <= 3; si++) {
-          const sx = o.x + (o.w / 4) * si;
-          ctx.beginPath(); ctx.moveTo(sx, o.y + 5); ctx.lineTo(sx, o.y + o.h - 5); ctx.stroke();
+          const sx = (o.w / 4) * si;
+          ctx.beginPath(); ctx.moveTo(sx, 5); ctx.lineTo(sx, o.h - 5); ctx.stroke();
         }
         // Arrow hint (↑)
         ctx.fillStyle = 'rgba(255,255,255,0.75)';
         ctx.font = 'bold 14px Arial';
         ctx.textAlign = 'center';
-        ctx.fillText('↑', o.x + o.w / 2, o.y + o.h - 8);
+        ctx.fillText('↑', o.w / 2, o.h - 8);
         // Highlight edge
         ctx.fillStyle = '#FFB0D4';
-        ctx.fillRect(o.x, o.y, o.w, 3);
-        ctx.fillRect(o.x, o.y, 3, o.h);
+        ctx.fillRect(0, 0, o.w, 3);
+        ctx.fillRect(0, 0, 3, o.h);
       } else {
         // ── Normal box ─────────────────────────────────────────────────────
-        const bg = ctx.createLinearGradient(o.x, o.y, o.x + o.w, o.y + o.h);
-        bg.addColorStop(0, '#C87941');
-        bg.addColorStop(1, '#7A4420');
-        ctx.fillStyle = bg;
-        ctx.fillRect(o.x, o.y, o.w, o.h);
+        ctx.fillStyle = _boxNormGrad;
+        ctx.fillRect(0, 0, o.w, o.h);
         // Cross stripes
         ctx.fillStyle = '#5C3010';
-        ctx.fillRect(o.x + o.w / 2 - 2, o.y,               4, o.h);
-        ctx.fillRect(o.x,                o.y + o.h / 2 - 2, o.w, 4);
+        ctx.fillRect(o.w / 2 - 2, 0,           4, o.h);
+        ctx.fillRect(0,           o.h / 2 - 2, o.w, 4);
         // Highlight edge
         ctx.fillStyle = '#E8A060';
-        ctx.fillRect(o.x, o.y, o.w, 3);
-        ctx.fillRect(o.x, o.y,   3, o.h);
+        ctx.fillRect(0, 0, o.w, 3);
+        ctx.fillRect(0, 0, 3,   o.h);
       }
+      ctx.restore();
     } else if (o.type === 'kangaroo') {
       drawKangaroo(o);
       if (o.frozenFrames > 0) drawFrozenOverlay(o);
@@ -2591,7 +2638,35 @@ function drawWolf(sw1, sw2, jump) {
   ctx.beginPath(); ctx.moveTo(22,-45); ctx.lineTo(25,-54); ctx.lineTo(27,-45); ctx.closePath(); ctx.fill();
 }
 
-const DRAW_FUNS = [drawFox, drawDog, drawCat, drawDonkey, drawWolf];
+function drawMole(sw1, sw2, jump) {
+  const F='#5C4033', D='#3E2723', S='#F48FB1', C='#8D6E63';
+  // Stubby legs
+  ctx.lineWidth=6; ctx.lineCap='round'; ctx.strokeStyle=D;
+  _l(-10,-13,jump?-8:sw1); _l(-6,-13,jump?-4:sw2);
+  _l(  8,-13,jump? 6:sw2); _l(12,-13,jump? 8:sw1);
+  // Large front digging paws with claws
+  ctx.fillStyle=C;
+  ctx.beginPath(); ctx.ellipse(-19,-8,11,7,-0.4,0,Math.PI*2); ctx.fill();
+  ctx.strokeStyle=D; ctx.lineWidth=2; ctx.lineCap='round';
+  for (let c=0;c<3;c++) {
+    ctx.beginPath(); ctx.moveTo(-24+c*3,-4); ctx.lineTo(-26+c*3,1); ctx.stroke();
+  }
+  // Body (stocky)
+  ctx.fillStyle=F; ctx.beginPath(); ctx.ellipse(1,-22,22,13,0,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle=C; ctx.beginPath(); ctx.ellipse(3,-19,13,8,0.1,0,Math.PI*2); ctx.fill();
+  // Head
+  ctx.fillStyle=F; ctx.beginPath(); ctx.arc(17,-31,12,0,Math.PI*2); ctx.fill();
+  // Dark pointed snout (triangle tip)
+  ctx.fillStyle=D;
+  ctx.beginPath(); ctx.moveTo(18,-38); ctx.lineTo(18,-22); ctx.lineTo(48,-30); ctx.closePath(); ctx.fill();
+  // Tiny eyes (moles have poor eyesight)
+  ctx.fillStyle='#111'; ctx.beginPath(); ctx.arc(17,-33,1.8,0,Math.PI*2); ctx.fill();
+  // Small round ears
+  ctx.fillStyle=F; ctx.beginPath(); ctx.arc(9,-41,5,Math.PI,0); ctx.fill();
+  ctx.fillStyle=S; ctx.beginPath(); ctx.arc(9,-41,3,Math.PI,0); ctx.fill();
+}
+
+const DRAW_FUNS = [drawFox, drawDog, drawCat, drawDonkey, drawWolf, drawMole];
 
 function drawAnimalSprite(cx, groundY, idx, runT, onGround) {
   const t    = runT * Math.PI * 2;
@@ -2715,7 +2790,7 @@ function drawPlayers() {
       ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 18, barW * ratio, 5);
     }
     if (p.animalIdx === 4 && p.wolfCooldown > 0) {
-      const barW = 36, ratio = 1 - p.wolfCooldown / 480;
+      const barW = 36, ratio = 1 - p.wolfCooldown / 288;
       ctx.fillStyle = 'rgba(0,0,0,0.35)';
       ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 18, barW, 5);
       ctx.fillStyle = `hsl(${220 + 60 * ratio},80%,65%)`;
@@ -2727,6 +2802,27 @@ function drawPlayers() {
       ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 18, barW, 5);
       ctx.fillStyle = `hsl(${30 + 60 * ratio},90%,55%)`;
       ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 18, barW * ratio, 5);
+    }
+    if (p.animalIdx === 5) {
+      if (p.moleCooldown > 0) {
+        // Cooldown active — show refill progress bar above player label
+        const barW = 36, ratio = 1 - p.moleCooldown / 600;
+        ctx.fillStyle = 'rgba(0,0,0,0.45)';
+        ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 34, barW, 6);
+        ctx.fillStyle = `hsl(${ratio * 120},90%,55%)`;
+        ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 34, barW * ratio, 6);
+      } else {
+        // Show remaining box run-throughs as number badge above player label
+        const col = p.moleBoxes >= 4 ? '#a0d080' : p.moleBoxes >= 2 ? '#ffcc44' : '#ff6644';
+        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        ctx.beginPath();
+        ctx.arc(p.x, p.y - PLAYER_SIZE - 26, 11, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = col;
+        ctx.font = 'bold 13px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText(p.moleBoxes, p.x, p.y - PLAYER_SIZE - 22);
+      }
     }
     drawAnimalSprite(p.x, p.y, p.animalIdx, p.runT, p.onGround);
     if (twoPlayer) {
@@ -2828,7 +2924,7 @@ function drawMobileButtons() {
   ];
   for (const { key, label, color } of defs) {
     const b       = MB[key];
-    const pressed = [...activeTouches.values()].includes(key);
+    const pressed = pressedButtons.has(key);
     ctx.globalAlpha = pressed ? 0.80 : 0.45;
     ctx.fillStyle   = color;
     rrect(b.x, b.y, b.w, b.h, 14); ctx.fill();
@@ -2979,7 +3075,7 @@ function drawSelect() {
 
     // Cards
     const cards = getCardRects(rowY);
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < ANIMALS.length; i++) {
       const c   = cards[i];
       const sel = i === selIdx;
 

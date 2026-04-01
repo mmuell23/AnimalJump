@@ -116,7 +116,7 @@ Kisten können in unterschiedlichen Höhen auftauchen:
 - drei Reihen
 - vier Reihen (ab Level 6)
 
-Kisten stehen in Blöcken nebeneinander. Blöcke stehen entweder immer direkt nebeneinander ohne Lücken oder haben mindestens 2 Felder Platz. Ab Level 6 sind es entweder gar keine Lücken zwischen Blöcken oder mindestens 5 Felder, damit genug Platz zum Landen ist.
+Kisten stehen in Blöcken nebeneinander. Blöcke stehen entweder immer direkt nebeneinander ohne Lücken oder haben mindestens 2 Felder Platz zwischen den einzelnen Blöcken. Ab Level 6 sind es entweder gar keine Lücken zwischen Blöcken oder mindestens 5 Felder, damit genug Platz zum Landen ist.
 Wenn Blöcke direkt nebeneinannderstehen, müssen mindestens 2 Blöcke nebeneinander die gleiche Höhe zum Aufstieg haben. 
 
 Beispiel für eine Reihe (Kiste: x, keine Kiste: o):
@@ -137,6 +137,18 @@ ooooooxxooooooooooo
 ooooooxxooooooooooo
 ooooxxxxxxoooooxxoo
 ooxxxxxxxxoooxxxxoo
+
+Beispiel für Reihen, die so nicht erlaubt sind, weil die Lücken mit einer Kiste nicht betreten werden können:
+oxxoxxx
+xxxxxxx
+
+Das hier hingegen geht:
+oxxooxx
+xxxxxxx
+
+Das hier geht auch:
+oxxooxx
+xxxooxx
 
 Wichtig ist:
 - damit man auf 3 oder 4 Reihen springen kann, müssen davor Kisten stehen, von denen man abspringen kann. Diese sind maximal 2 Kisten hoch und mindestens 2 Kisten breit, damit die Fläche zum Absprung breit genug ist. 
@@ -224,7 +236,7 @@ Gibt die maximale Spaltenhöhe (1–4) für den nächsten Cluster zurück, abhä
 Gibt ein Array von Spaltenhöhen zurück (Mountain-Profil: Aufstieg → Peak → Abstieg). **Kein interne Lücken** — alle Spalten direkt nebeneinander.
 
 - `maxH === 1`: flacher Block, 1–5 Spalten, alle Höhe 1
-- `maxH === 2`: 2–6 Spalten, Mischung aus Höhe 1 und 2 (55 % → Höhe 2)
+- `maxH === 2`: Gruppen aus Höhe-2-Spalten, getrennt durch Lücken ≥2 Höhe-1-Spalten (1-Spalten-Lücken verboten — zu schmal zum Landen). Optional: führende/abschließende Höhe-1-Spalte.
 - `maxH === 3`: `[1,1]` Anlauf, optional `[2,2]` (65 %), Peak mit 1–3 Spalten Höhe 3, optional Abstieg `[2,1]` oder `[2]`
 - `maxH === 4`: `[1,1,2,2]` Anlauf (Pflicht), Peak 1–3 Spalten Höhe 4, optional Abstieg `[2,2,1]` oder `[2,2]`
 
