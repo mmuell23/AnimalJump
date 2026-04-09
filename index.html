@@ -172,6 +172,10 @@ const LEVEL_CFG = [
     sky1: '#001228', sky2: '#023060', ground: '#D0E8F8',
     sunColor: '#c0d8ff', sunGlow: 'rgba(160,200,255,',
     ditchWMin: 80, ditchWMax: 200 },
+  { speed: 5.0, lionRatio: 0.00, gapLo:  90, gapHi: 180,
+    sky1: '#140000', sky2: '#2c0500', ground: '#1a0800',
+    sunColor: '#ff4400', sunGlow: 'rgba(255,80,0,',
+    ditchWMin: 80, ditchWMax: 120, bridgeLevel: true },
 ];
 
 // ── Diamond type registry ──────────────────────────────────────────────────────
@@ -218,8 +222,11 @@ let shadowWolves  = []; // wolf ability
 let yarnBalls     = []; // cat ability
 let clocks        = []; // level 1 speed-boost collectible
 let hourglasses   = []; // level 5 slow-time collectible
+let swapItems     = []; // 2-player ability-swap collectible
 let clockFrames     = 0; // frames remaining for 1.5× speed boost
 let hourglassFrames = 0; // frames remaining for ½ speed slow
+let swapFrames      = 0; // frames remaining for ability swap
+const _swapOrig     = [0, 0]; // original animalIdx before swap
 // Spawn state consolidated into one object (reset in initLevel)
 let spawner = {
   cd: 160,          // unified spawn-stream cooldown (frames)
@@ -533,8 +540,8 @@ document.addEventListener('keydown', e => {
     if      (gs === 'levelend')                 advanceLevel();
     else if (gs === 'gameover' || gs === 'win') gs = 'select';
   }
-  // Dev shortcut: digit 1–8 → jump to that level with 3 lives
-  const digitMatch = e.code.match(/^Digit([1-8])$/);
+  // Dev shortcut: digit 1–9 → jump to that level with 3 lives
+  const digitMatch = e.code.match(/^Digit([1-9])$/);
   if (digitMatch) {
     level = parseInt(digitMatch[1]);
     lives = 3;
@@ -707,8 +714,10 @@ function initLevel() {
   yarnBalls     = [];
   clocks        = [];
   hourglasses   = [];
+  swapItems     = [];
   clockFrames     = 0;
   hourglassFrames = 0;
+  swapFrames      = 0;
   popups     = [];
   if (level % 2 === 1) heartSpawned = false;
   const _scfg = LEVEL_CFG[level - 1];
@@ -724,11 +733,26 @@ function initLevel() {
     rocketCount: 0,
     clockSpawned: false,
     hourglassSpawned: false,
+    swapSpawned: false,
     highDiaCD: 200 + Math.floor(spawnRng() * 100),
+    lastBridgeY: GROUND_Y,
   };
   players = [ makePlayer(PLAYER_X, selAnimal) ];
   if (twoPlayer) players.push(makePlayer(PLAYER_X2, selAnimal2));
   for (const c of clouds) c.x = [90, 330, 570, 730][clouds.indexOf(c)];
+  if (LEVEL_CFG[level - 1].bridgeLevel) {
+    ditches.push({ x: -W, w: W * 200 });  // mega-ditch: entire level is void
+    // Pre-fill visible area with bridges (all at ground level, varied widths)
+    const _startWidths = [380, 150, 180, 130];
+    const _gap0 = 80;
+    let _bx0 = 0;
+    for (const _bw0 of _startWidths) {
+      obstacles.push({ x: _bx0, y: GROUND_Y, w: _bw0, h: 22, type: 'bridge' });
+      _bx0 += _bw0 + _gap0;
+      if (_bx0 > W + 200) break;
+    }
+    spawner.cd = 55; // first dynamic bridge arrives before pre-spawned ones exit
+  }
 }
 
 function advanceLevel() {
@@ -749,6 +773,13 @@ function update() {
   const rocketFade = maxRocket > 0 ? Math.min(1, maxRocket / 90) : 0;
   if (clockFrames     > 0) clockFrames--;
   if (hourglassFrames > 0) hourglassFrames--;
+  if (swapFrames > 0) {
+    swapFrames--;
+    if (swapFrames === 0 && players.length >= 2) {
+      players[0].animalIdx = _swapOrig[0];
+      players[1].animalIdx = _swapOrig[1];
+    }
+  }
   let speedMult = 1 + rocketFade;
   if (clockFrames     > 0) speedMult *= 1.5;
   if (hourglassFrames > 0) speedMult *= 0.5;
@@ -803,7 +834,7 @@ function updateWorld(cfg) {
   // Move & cull obstacles/ditches — in-place, no filter allocation
   for (let i = obstacles.length - 1; i >= 0; i--) {
     obstacles[i].x -= cfg.speed;
-    if (obstacles[i].x <= -200) obstacles.splice(i, 1);
+    if (obstacles[i].x + (obstacles[i].w || 0) < -50) obstacles.splice(i, 1);
   }
   for (let i = ditches.length - 1; i >= 0; i--) {
     const d = ditches[i];
@@ -891,6 +922,24 @@ function updateCollectibles(cfg) {
     }
   }
 
+  for (let i = swapItems.length - 1; i >= 0; i--) {
+    const s = swapItems[i];
+    s.x -= cfg.speed;
+    if (s.x < -20) { swapItems.splice(i, 1); continue; }
+    for (const p of players) {
+      if (Math.abs(p.x - s.x) < halfP + 14 && Math.abs((p.y - halfP) - s.y) < halfP + 14) {
+        _swapOrig[0] = players[0].animalIdx;
+        _swapOrig[1] = players[1].animalIdx;
+        players[0].animalIdx = _swapOrig[1];
+        players[1].animalIdx = _swapOrig[0];
+        swapFrames = 600;
+        playPotion();
+        popups.push({ x: s.x, y: s.y - 10, text: '🔀 Tausch!', life: 90, color: '#dd88ff' });
+        swapItems.splice(i, 1); break;
+      }
+    }
+  }
+
   for (let i = diamonds.length - 1; i >= 0; i--) {
     const d = diamonds[i];
     d.x -= cfg.speed;
@@ -916,17 +965,45 @@ function updateEnemies(cfg) {
     // ── Kangaroo: bounces left/right ─────────────────────────────────────────
     if (o.type === 'kangaroo') {
       const groundY = GROUND_Y - o.h;
+      const isBridge = LEVEL_CFG[level - 1].bridgeLevel;
       if (o.jumpTimer > 0) {
         o.jumpTimer--;
+        // Bridge-edge check: bias next jump toward bridge center
+        if (isBridge && o.bridgeObj) {
+          if (o.x < o.bridgeObj.x + 8)                      o.jumpVxBias =  1;
+          else if (o.x + o.w > o.bridgeObj.x + o.bridgeObj.w - 8) o.jumpVxBias = -1;
+          else                                                o.jumpVxBias =  0;
+        }
       } else if (o.jumpTimer === 0) {
-        o.vy = -(10 + Math.random() * 2);
-        o.vx = (Math.random() < 0.5 ? -1 : 1) * (0.8 + Math.random() * 1.4);
-        o.jumpTimer = -1; // mark airborne
+        o.vy = -(9 + Math.random() * 2);
+        const bias = isBridge ? (o.jumpVxBias || 0) : 0;
+        o.vx = bias !== 0
+          ? bias * (0.6 + Math.random() * 1.2)
+          : (Math.random() < 0.5 ? -1 : 1) * (0.8 + Math.random() * 1.4);
+        o.jumpTimer = -1;
       } else { // airborne
         o.vy += GRAVITY;
         o.y  += o.vy;
         o.x  += o.vx;
-        if (o.y >= groundY) {
+        if (isBridge) {
+          // Land on bridge surface; fall into lava if no bridge below
+          let landed = false;
+          if (o.vy >= 0) {
+            for (const b of obstacles) {
+              if (b.type !== 'bridge') continue;
+              if (o.x + o.w > b.x + 4 && o.x < b.x + b.w - 4 && o.y >= b.y - o.h) {
+                o.y = b.y - o.h;
+                o.vy = 0; o.vx = 0;
+                o.jumpTimer = 22 + Math.floor(Math.random() * 22);
+                o.bridgeObj = b;
+                o.jumpVxBias = 0;
+                landed = true;
+                break;
+              }
+            }
+          }
+          if (!landed && o.y > H + 60) o.x = -600; // fell into lava
+        } else if (o.y >= groundY) {
           o.y = groundY;
           o.vy = 0; o.vx = 0;
           o.jumpTimer = 22 + Math.floor(Math.random() * 22);
@@ -961,7 +1038,10 @@ function updateSpawner(cfg) {
 
   // Main spawn stream
   spawner.cd--;
-  if (spawner.cd <= 0 && frame < flagSpawnFrame - clearZoneFrames) spawnNext(cfg);
+  if (spawner.cd <= 0 && frame < flagSpawnFrame - clearZoneFrames) {
+    if (LEVEL_CFG[level - 1].bridgeLevel) spawnNextBridge(cfg);
+    else spawnNext(cfg);
+  }
 
   // High diamonds — only reachable in float mode (y ≈ 60–130, above max jump height)
   spawner.highDiaCD--;
@@ -997,6 +1077,13 @@ function updateSpawner(cfg) {
       spawner.hourglassSpawned = true;
     }
   }
+  // Swap: 2-player only, first half of level
+  if (twoPlayer && !spawner.swapSpawned && frame >= 300 && frame <= LEVEL_FRAMES / 2) {
+    if (obstaclesClearAt(W + 20, 90)) {
+      swapItems.push({ x: W + 20, y: GROUND_Y - 95 });
+      spawner.swapSpawned = true;
+    }
+  }
 }
 
 function updateCollisions() {
@@ -1015,7 +1102,7 @@ function updateCollisions() {
       }
     } else if (p.invFrames === 0) {
       for (const o of obstacles) {
-        if (o.type === 'flag' || o.type === 'platform') continue;
+        if (o.type === 'flag' || o.type === 'platform' || o.type === 'bridge') continue;
         if (!overlaps(p, o)) continue;
         if (o.type === 'box') {
           if (p.vy >= 0 && p.y > o.y + 5) {
@@ -1148,14 +1235,14 @@ function updatePlayer(p, cfg) {
 
   if (!p.onGround && p.vy >= 0) {
     for (const o of obstacles) {
-      if (o.type !== 'box' && o.type !== 'platform') continue;
+      if (o.type !== 'box' && o.type !== 'platform' && o.type !== 'bridge') continue;
       const pL = p.x - PLAYER_SIZE / 2 + 8;
       const pR = p.x + PLAYER_SIZE / 2 - 8;
       if (pR > o.x && pL < o.x + o.w && p.y >= o.y && prevY <= o.y + 6) {
         p.y = o.y;
         const _isP1b = p === players[0];
         const _dnKey = _isP1b ? keys['ArrowDown'] : keys['KeyS'];
-        if (!o.trampoline && p.animalIdx === 3 && _dnKey && p.donkeyBoxCD === 0) {
+        if (o.type !== 'bridge' && !o.trampoline && p.animalIdx === 3 && _dnKey && p.donkeyBoxCD === 0) {
           // Donkey ground-pound: explode box, bounce up, 25 pts
           explodeBox(o);
           p.vy        = JUMP_VY * 1.15;
@@ -1260,6 +1347,82 @@ function explodeBox(o) {
 
 // ── Spawn helpers ─────────────────────────────────────────────────────────────
 const BOX_W = 44, BOX_H = 46;
+
+// ── Bridge-level spawn stream (level 9) ──────────────────────────────────────
+// Three height levels reachable by jumping
+const BRIDGE_HEIGHTS = [GROUND_Y, GROUND_Y - 90, GROUND_Y - 150];
+
+function spawnNextBridge(cfg) {
+  // Choose height: step up, stay, or step down from previous bridge
+  const curIdx  = Math.max(0, BRIDGE_HEIGHTS.indexOf(spawner.lastBridgeY));
+  const step    = Math.floor(spawnRng() * 3) - 1;            // -1, 0, +1
+  const nextIdx = Math.max(0, Math.min(BRIDGE_HEIGHTS.length - 1, curIdx + step));
+  const by      = BRIDGE_HEIGHTS[nextIdx];
+
+  // Width: short / medium / long  (75–250 px)
+  const bw = 75 + Math.floor(spawnRng() * 176);
+  const bridge = { x: W + 20, y: by, w: bw, h: 22, type: 'bridge' };
+  obstacles.push(bridge);
+  spawner.lastBridgeY = by;
+
+  // Kangaroo on bridge (40% chance)
+  if (spawnRng() < 0.40) {
+    const kw = 52, kh = 68;
+    obstacles.push({
+      x: bridge.x + Math.floor(spawnRng() * Math.max(1, bw - kw)),
+      y: by - kh, w: kw, h: kh, type: 'kangaroo',
+      vy: 0, vx: 0,
+      jumpTimer: 30 + Math.floor(spawnRng() * 30),
+      bridgeObj: bridge, jumpVxBias: 0,
+    });
+  }
+
+  // Vulture (25% chance, not two in a row) — oscillates relative to bridge height
+  if (spawnRng() < 0.25 && spawner.lastType !== 'vulture') {
+    const vw = 68, vh = 44;
+    const vYLow  = by - 65;
+    const vYHigh = Math.max(30, by - 185);
+    obstacles.push({
+      x: bridge.x + bw / 2 - vw / 2,
+      y: vYHigh + Math.floor(spawnRng() * (vYLow - vYHigh)),
+      yLow: vYLow, yHigh: vYHigh,
+      w: vw, h: vh, type: 'vulture',
+      state: 'top', stateTimer: 50 + Math.floor(spawnRng() * 40),
+      waitBot: 60 + Math.floor(spawnRng() * 60),
+      waitTop: 50 + Math.floor(spawnRng() * 50),
+      flySpeed: 2.5,
+    });
+    spawner.lastType = 'vulture';
+  } else {
+    spawner.lastType = 'bridge';
+  }
+
+  // Collectibles positioned relative to bridge surface
+  if (spawner.diamondBudget > 0 && spawnRng() < 0.60) {
+    const def = DIAMOND.box;
+    diamonds.push({ x: bridge.x + bw / 2, y: by - 36, color: def.color, pts: def.pts });
+    spawner.diamondBudget--;
+  }
+  if (!spawner.potionSpawned && spawnRng() < 0.18) {
+    potions.push({ x: bridge.x + bw / 2, y: by - 28 });
+    spawner.potionSpawned = true;
+  }
+  const rocketMax = twoPlayer ? 2 : 1;
+  if (spawner.rocketCount < rocketMax && spawnRng() < 0.12) {
+    rockets.push({ x: bridge.x + bw / 2, y: by - 30 });
+    spawner.rocketCount++;
+  }
+  if (!heartSpawned && spawnRng() < 0.22) {
+    hearts.push({ x: bridge.x + bw * 0.65, y: by - 38 });
+    heartSpawned = true;
+  }
+
+  // Gap: smaller when jumping up, normal otherwise
+  const heightRise = BRIDGE_HEIGHTS[curIdx] - by; // positive = going up
+  const gapBase    = 70 + Math.floor(spawnRng() * 46);   // 70–115 px
+  const gap        = Math.max(50, gapBase - Math.floor(heightRise * 0.22));
+  spawner.cd = Math.round((bw + gap) / cfg.speed);
+}
 
 function spawnNext(cfg) {
   const roll        = spawnRng();
@@ -1539,7 +1702,7 @@ function spawnPlatform(n) {
 // Returns true when no enemy/box obstacle occupies a horizontal window of ±margin around x
 function obstaclesClearAt(x, margin) {
   return !obstacles.some(o => {
-    if (o.type === 'flag' || o.type === 'platform') return false;
+    if (o.type === 'flag' || o.type === 'platform' || o.type === 'bridge') return false;
     const oc = o.x + (o.w || 0) / 2;
     return oc > 0 && Math.abs(oc - x) < margin;
   });
@@ -1610,6 +1773,7 @@ function draw() {
   drawRocketItems();
   drawClocks();
   drawHourglasses();
+  drawSwapItems();
   drawParticles();
   drawShadowWolves();
   drawYarnBalls();
@@ -1679,6 +1843,9 @@ function drawBackground() {
     ctx.fill();
     for (const c of clouds) drawCloud(c.x, c.y, c.r, true);
     drawDesert();
+  } else if (LEVEL_CFG[level - 1].bridgeLevel) {
+    // Lava chasm: no sun, heat glow rising, floating embers
+    drawLavaChasm();
   } else if (level >= 8) {
     // North Pole: aurora borealis, pale moon, snow drifts
     const moonX = W - 80, moonY = 58;
@@ -1906,6 +2073,35 @@ function drawNorthPole() {
   }
 }
 
+// ── Lava chasm background (level 9) ──────────────────────────────────────────
+function drawLavaChasm() {
+  // Hot glow rising from lava below — gradient fading upward
+  const heatGrad = ctx.createLinearGradient(0, GROUND_Y - 130, 0, GROUND_Y);
+  heatGrad.addColorStop(0, 'rgba(255,60,0,0)');
+  heatGrad.addColorStop(1, 'rgba(255,60,0,0.50)');
+  ctx.fillStyle = heatGrad;
+  ctx.fillRect(0, GROUND_Y - 130, W, 130);
+
+  // Faint cavern wall vignette on left and right edges
+  ctx.fillStyle = 'rgba(20,5,0,0.55)';
+  ctx.fillRect(0, 0, 55, GROUND_Y);
+  ctx.fillRect(W - 55, 0, 55, GROUND_Y);
+
+  // Floating embers rising from below — deterministic, no array allocation
+  for (let i = 0; i < 22; i++) {
+    const speed = 0.28 + (i % 4) * 0.12;
+    const ex  = (i * 139 + 23) % W;
+    const phase = (frame * speed + i * 53) % (GROUND_Y + 10);
+    const ey  = GROUND_Y - phase;
+    if (ey < 0) continue;
+    const alpha = Math.min(1, (GROUND_Y - ey) / 80) * (0.5 + (i % 3) * 0.15);
+    ctx.fillStyle = `rgba(255,${80 + (i % 5) * 28},0,${alpha.toFixed(2)})`;
+    ctx.beginPath();
+    ctx.arc(ex, ey, 1.2 + (i % 3) * 0.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
 // ── Forest background (level 2) ───────────────────────────────────────────────
 // Each layer is an array of { dx, trunkH, crownR } within a W-wide repeating tile.
 const FOREST_BACK = [
@@ -2051,6 +2247,38 @@ function drawHourglasses() {
     ctx.beginPath();
     ctx.moveTo(-6, 13); ctx.lineTo(6, 13); ctx.lineTo(0, 6); ctx.closePath();
     ctx.fillStyle = '#f5d060'; ctx.fill();
+    ctx.restore();
+  }
+}
+
+// ── Swap collectible ─────────────────────────────────────────────────────────
+function drawSwapItems() {
+  for (const s of swapItems) {
+    const bob = Math.sin(frame * 0.08 + s.x * 0.01) * 4;
+    ctx.save();
+    ctx.translate(s.x, s.y + bob);
+    ctx.shadowColor = '#cc66ff'; ctx.shadowBlur = 14;
+    // Glow rings
+    ctx.fillStyle = 'rgba(180,80,255,0.18)';
+    ctx.beginPath(); ctx.arc(0, 0, 22, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = 'rgba(200,100,255,0.28)';
+    ctx.beginPath(); ctx.arc(0, 0, 15, 0, Math.PI * 2); ctx.fill();
+    // Circular arrow arc (270° loop)
+    ctx.strokeStyle = '#ee88ff';
+    ctx.lineWidth = 3.5;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.arc(0, 0, 9, -Math.PI * 0.15, Math.PI * 1.65);
+    ctx.stroke();
+    // Arrowhead at arc end
+    ctx.fillStyle = '#ee88ff';
+    ctx.save();
+    ctx.translate(9 * Math.cos(Math.PI * 1.65), 9 * Math.sin(Math.PI * 1.65));
+    ctx.rotate(Math.PI * 1.65 + Math.PI * 0.5);
+    ctx.beginPath();
+    ctx.moveTo(0, -5); ctx.lineTo(-3.5, 3); ctx.lineTo(3.5, 3);
+    ctx.closePath(); ctx.fill();
+    ctx.restore();
     ctx.restore();
   }
 }
@@ -2546,6 +2774,37 @@ function drawObstacles() {
       ctx.strokeStyle = 'rgba(100, 180, 255, 0.7)';
       ctx.lineWidth = 1;
       ctx.strokeRect(o.x + 0.5, o.y + 0.5, o.w - 1, o.h - 1);
+    } else if (o.type === 'bridge') {
+      const bx = o.x, by = o.y, bw = o.w, bh = o.h;
+      // Faint drop shadow
+      ctx.fillStyle = 'rgba(0,0,0,0.25)';
+      ctx.fillRect(bx + 4, by + bh + 1, bw, 5);
+      // Plank base
+      ctx.fillStyle = '#4A2200';
+      ctx.fillRect(bx, by, bw, bh);
+      // Individual planks (warm brown)
+      ctx.fillStyle = '#7A3E0E';
+      for (let px = bx + 2; px < bx + bw - 2; px += 19) {
+        const pw = Math.min(15, bx + bw - 3 - px);
+        if (pw > 0) ctx.fillRect(px, by + 3, pw, bh - 5);
+      }
+      // Top surface highlight
+      ctx.fillStyle = '#B06020';
+      ctx.fillRect(bx, by, bw, 3);
+      // Hanging chains at both ends
+      ctx.strokeStyle = '#906840';
+      ctx.lineWidth = 1.5;
+      ctx.lineCap = 'butt';
+      for (const chainX of [bx + 10, bx + bw - 10]) {
+        ctx.beginPath();
+        for (let cy = by + bh; cy < by + bh + 28; cy += 9) {
+          ctx.moveTo(chainX - 2, cy);
+          ctx.lineTo(chainX + 2, cy + 4.5);
+          ctx.lineTo(chainX - 2, cy + 9);
+        }
+        ctx.stroke();
+      }
+      ctx.lineCap = 'round';
     } else if (o.type === 'flag') {
       const px = o.x;
       const base = GROUND_Y;
@@ -2941,6 +3200,29 @@ function drawPlayers() {
         ctx.fillText(p.moleBoxes, p.x, p.y - PLAYER_SIZE - 22);
       }
     }
+    if (swapFrames > 0) {
+      // Circular arrow icon above player to indicate swapped abilities
+      const spin = (frame * 0.06) % (Math.PI * 2);
+      const iy = p.y - PLAYER_SIZE - 46;
+      ctx.save();
+      ctx.translate(p.x, iy);
+      ctx.rotate(spin);
+      ctx.strokeStyle = '#dd88ff';
+      ctx.lineWidth = 2.5;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.arc(0, 0, 8, -Math.PI * 0.15, Math.PI * 1.65);
+      ctx.stroke();
+      ctx.fillStyle = '#dd88ff';
+      ctx.save();
+      ctx.translate(8 * Math.cos(Math.PI * 1.65), 8 * Math.sin(Math.PI * 1.65));
+      ctx.rotate(Math.PI * 1.65 + Math.PI * 0.5);
+      ctx.beginPath();
+      ctx.moveTo(0, -4); ctx.lineTo(-3, 2.5); ctx.lineTo(3, 2.5);
+      ctx.closePath(); ctx.fill();
+      ctx.restore();
+      ctx.restore();
+    }
     drawAnimalSprite(p.x, p.y, p.animalIdx, p.runT, p.onGround);
     if (twoPlayer) {
       const label = p === players[0] ? 'P1' : 'P2';
@@ -3026,6 +3308,15 @@ function drawHUD() {
     ctx.fillStyle = '#88aaff';
     ctx.font = 'bold 13px Arial'; ctx.textAlign = 'left';
     ctx.fillText(`🐢 Zeitlupe  ${secs}s`, 22, 70);
+  }
+  if (swapFrames > 0) {
+    const secs = Math.ceil(swapFrames / 60);
+    const yOff = (clockFrames > 0 || hourglassFrames > 0) ? 84 : 52;
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    rrect(14, yOff, 130, 26, 6); ctx.fill();
+    ctx.fillStyle = '#dd88ff';
+    ctx.font = 'bold 13px Arial'; ctx.textAlign = 'left';
+    ctx.fillText(`🔀 Tausch  ${secs}s`, 22, yOff + 18);
   }
 
   // Virtual buttons (mobile only)

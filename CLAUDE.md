@@ -33,7 +33,7 @@ BOX_W = 44, BOX_H = 46
 
 ## Konfigurationsobjekte
 
-### `LEVEL_CFG[0..7]` — 8 Level
+### `LEVEL_CFG[0..8]` — 9 Level
 
 Pro Level: `speed`, `lionRatio`, `gapLo/Hi`, `ditchWMin/Max`, Sky-/Bodenfarben.
 
@@ -47,6 +47,7 @@ Pro Level: `speed`, `lionRatio`, `gapLo/Hi`, `ditchWMin/Max`, Sky-/Bodenfarben.
 | 6 | 7.0 | 0.62 | Gleiche Geschwindigkeit wie L5; Nacht-Stadtsilhouette; spezielle Kisten-Cluster |
 | 7 | 7.0 | 0.72 | Gleiche Geschwindigkeit wie L6; Wüstenlandschaft; brennende Sonne; Sanddünen; Kakteen |
 | 8 | 7.3 | 0.82 | Etwas schneller; Nordpol-Nacht; Aurora Borealis; Mondlicht; Schneedünen |
+| 9 | 5.0 | 0.00 | Brückenlevel (`bridgeLevel: true`); ganzes Level ist Lava-Graben; kein Boden; nur Brücken |
 
 > **Level 6 – Besonderheiten:**
 > - Hintergrund: scrollende Hochhaus-Silhouetten mit Fenstern (`drawSkyscrapers()`), Mond statt Sonne.
@@ -276,9 +277,19 @@ Einheitliche Spawn-Funktion für alle Level:
 
 ---
 
+> **Level 9 – Besonderheiten (Brückenlevel):**
+> - Beim Level-Start: Mega-Graben `{ x: -W, w: W*200 }` + Startbrücke `w=310` → kein normaler Boden.
+> - Neuer Obstacle-Typ `'bridge'`: One-Way-Landing wie Plattform; `y = GROUND_Y`; `h = 22`.
+> - Spawn-Stream: `spawnNextBridge()` statt `spawnNext()` — spawnt nur Brücken, Geier, Kängurus.
+> - Kängurus landen auf Brückenoberflächen und fallen in die Lava wenn sie die Kante verlassen.
+> - Kängurus haben `bridgeObj`-Referenz + `jumpVxBias` für Kantenumkehr.
+> - Hintergrund: `drawLavaChasm()` — Hitzeglühen, Glutpartikel, Cavernenvignette.
+> - Brücken sind immun gegen Esel-Stampfer.
+> - Keine Löwen; Gegner: Geier + Kängurus.
+
 ## Dev-Shortcuts (Tastatur)
 
-Tasten **1–6** springen direkt zum entsprechenden Level (3 Leben, Punkte auf 0, aktuelle Tier-/Spieleranzahl-Einstellungen bleiben erhalten).
+Tasten **1–9** springen direkt zum entsprechenden Level (3 Leben, Punkte auf 0, aktuelle Tier-/Spieleranzahl-Einstellungen bleiben erhalten).
 
 ---
 
