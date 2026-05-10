@@ -116,14 +116,16 @@ const ANIMALS = [
   { name: 'Esel'     },
   { name: 'Wolf'     },
   { name: 'Maulwurf' },
+  { name: 'Leopard'  },
 ];
 const ANIMAL_ABILITIES = [
   '↑ Doppelsprung',
   '↓ Einfrieren',
   '↓ Wollknäuel',
   '↓+Spr. Kiste +25',
-  '↓ Schattenwolf',
+  '↓ Räumt Kisten + friert Gräben ein (2×)',
   '10× durch Kisten',
+  '↓ Supersprung (5s)',
 ];
 // Hint lines shown in-game at level start [jumpKey, moveKeys, abilityLine]
 const ANIMAL_HINT = [
@@ -131,11 +133,12 @@ const ANIMAL_HINT = [
   ['Springen', 'Laufen', '↓: Gegner einfrieren'],
   ['Springen', 'Laufen', '↓: Wollknäuel schießen'],
   ['Springen', 'Laufen', '↓+Sprung auf Kiste: +25'],
-  ['Springen', 'Laufen', '↓: Schattenwolf rufen'],
+  ['Springen', 'Laufen', '↓: Kisten weg + Gräben einfrieren! (2×/Level)'],
   ['Springen', 'Laufen', 'Läuft durch Kisten!'],
+  ['Springen', 'Laufen', '↓: Supersprung! (5s CD)'],
 ];
 // Main body color per animal — used to tint the rocket sprite
-const ANIMAL_COLORS = ['#E55A15', '#C48B2F', '#888888', '#B8B8B8', '#607080', '#5C4033'];
+const ANIMAL_COLORS = ['#E55A15', '#C48B2F', '#888888', '#B8B8B8', '#607080', '#5C4033', '#C89020'];
 
 // ditchWMax = 70% of max jump distance (speed × airtime ~46 frames) → always crossable
 // gapLo/Hi: pixel gap between spawned elements (converted to frames via /speed)
@@ -176,6 +179,22 @@ const LEVEL_CFG = [
     sky1: '#140000', sky2: '#2c0500', ground: '#1a0800',
     sunColor: '#ff4400', sunGlow: 'rgba(255,80,0,',
     ditchWMin: 80, ditchWMax: 120, bridgeLevel: true },
+  { speed: 6.5, lionRatio: 0.65, gapLo:  78, gapHi: 155,
+    sky1: '#0d1528', sky2: '#7a2850', ground: '#E8F2FF',
+    sunColor: '#FFB870', sunGlow: 'rgba(255,180,100,',
+    ditchWMin: 80, ditchWMax: 200 },
+  { speed: 6.0, lionRatio: 0.62, gapLo:  80, gapHi: 160,
+    sky1: '#87CEEB', sky2: '#C9EAFF', ground: '#4a8a2a',
+    sunColor: '#FFD700', sunGlow: 'rgba(255,220,80,',
+    ditchWMin: 80, ditchWMax: 200 },
+  { speed: 6.0, lionRatio: 0.68, gapLo:  80, gapHi: 160,
+    sky1: '#87CEEB', sky2: '#C9EAFF', ground: '#4a8a2a',
+    sunColor: '#FFD700', sunGlow: 'rgba(255,220,80,',
+    ditchWMin: 80, ditchWMax: 200 },
+  { speed: 5.5, lionRatio: 0.00, gapLo: 100, gapHi: 200,
+    sky1: '#04080f', sky2: '#0a1020', ground: '#1a1a2a',
+    sunColor: '#c0c8e0', sunGlow: 'rgba(180,200,240,',
+    ditchWMin: 80, ditchWMax: 120, buildingLevel: true },
 ];
 
 // ── Diamond type registry ──────────────────────────────────────────────────────
@@ -223,6 +242,10 @@ let yarnBalls     = []; // cat ability
 let clocks        = []; // level 1 speed-boost collectible
 let hourglasses   = []; // level 5 slow-time collectible
 let swapItems     = []; // 2-player ability-swap collectible
+let snowballs     = []; // level 10 flying snowballs
+let morphItems    = []; // surprise transform collectible
+let morphFrames   = [0, 0]; // remaining transform frames per player
+const _morphOrig  = [-1, -1]; // original animalIdx while transformed (-1 = normal)
 let clockFrames     = 0; // frames remaining for 1.5× speed boost
 let hourglassFrames = 0; // frames remaining for ½ speed slow
 let swapFrames      = 0; // frames remaining for ability swap
@@ -246,6 +269,7 @@ let clouds      = [
   { x: 730, y: 38,  r: 34 },
 ];
 const keys = {}; // live key state for float mode
+let _devLastDigit = 0; // tracks "1" press for "1→0" = level 10 shortcut
 
 // ── Mobile detection & virtual button layout ──────────────────────────────────
 const isMobile = navigator.maxTouchPoints > 0 || 'ontouchstart' in window;
@@ -305,11 +329,13 @@ function makePlayer(x, animalIdx) {
     doubleJumped: false,  // fox: consumed on 2nd airborne jump
     barkCooldown: 0,      // dog: frames until bark is ready again
     scratchCooldown: 0,   // cat: frames until scratch is ready again
-    wolfCooldown: 0,      // wolf: frames until howl is ready again
+    wolfCooldown: 0,      // wolf: frames until next use is ready
+    wolfCharges: 2,       // wolf: uses remaining this level
     donkeyBoxCount: 0,    // donkey: boxes destroyed since last cooldown
     donkeyBoxCD: 0,       // donkey: frames until ground-pound is ready again
     moleBoxes: 5,         // mole: remaining box run-throughs (refills after cooldown)
     moleCooldown: 0,      // mole: frames until next refill (600 = 10 s)
+    leopardCooldown: 0,   // leopard: frames until super-jump is ready (300 = 5 s)
   };
 }
 
@@ -540,15 +566,29 @@ document.addEventListener('keydown', e => {
     if      (gs === 'levelend')                 advanceLevel();
     else if (gs === 'gameover' || gs === 'win') gs = 'select';
   }
-  // Dev shortcut: digit 1–9 → jump to that level with 3 lives
-  const digitMatch = e.code.match(/^Digit([1-9])$/);
+  // Dev shortcut: digit 1–9 → jump to that level; "1" then "0" → level 10
+  const digitMatch = e.code.match(/^Digit([0-9])$/);
   if (digitMatch) {
-    level = parseInt(digitMatch[1]);
-    lives = 3;
-    score = 0;
-    freshLevelSeed();
-    initLevel();
-    gs = 'playing';
+    const d = parseInt(digitMatch[1]);
+    if (d === 0 && _devLastDigit === 1) {
+      level = 10; _devLastDigit = 0;
+      lives = 3; score = 0; freshLevelSeed(); initLevel(); gs = 'playing';
+    } else if (d === 1 && _devLastDigit === 1) {
+      level = 11; _devLastDigit = 0;
+      lives = 3; score = 0; freshLevelSeed(); initLevel(); gs = 'playing';
+    } else if (d === 2 && _devLastDigit === 1) {
+      level = 12; _devLastDigit = 0;
+      lives = 3; score = 0; freshLevelSeed(); initLevel(); gs = 'playing';
+    } else if (d === 3 && _devLastDigit === 1) {
+      level = 13; _devLastDigit = 0;
+      lives = 3; score = 0; freshLevelSeed(); initLevel(); gs = 'playing';
+    } else if (d >= 1 && d <= 9) {
+      _devLastDigit = d;
+      level = d;
+      lives = 3; score = 0; freshLevelSeed(); initLevel(); gs = 'playing';
+    } else {
+      _devLastDigit = 0;
+    }
   }
 });
 document.addEventListener('keyup', e => {
@@ -715,6 +755,10 @@ function initLevel() {
   clocks        = [];
   hourglasses   = [];
   swapItems     = [];
+  snowballs     = [];
+  morphItems    = [];
+  morphFrames[0] = 0; morphFrames[1] = 0;
+  _morphOrig[0]  = -1; _morphOrig[1]  = -1;
   clockFrames     = 0;
   hourglassFrames = 0;
   swapFrames      = 0;
@@ -734,8 +778,11 @@ function initLevel() {
     clockSpawned: false,
     hourglassSpawned: false,
     swapSpawned: false,
+    morphSpawned: false,
+    snowballCD: 120,
     highDiaCD: 200 + Math.floor(spawnRng() * 100),
     lastBridgeY: GROUND_Y,
+    lastBuildY:  GROUND_Y - 100,
   };
   players = [ makePlayer(PLAYER_X, selAnimal) ];
   if (twoPlayer) players.push(makePlayer(PLAYER_X2, selAnimal2));
@@ -743,7 +790,7 @@ function initLevel() {
   if (LEVEL_CFG[level - 1].bridgeLevel) {
     ditches.push({ x: -W, w: W * 200 });  // mega-ditch: entire level is void
     // Pre-fill visible area with bridges (all at ground level, varied widths)
-    const _startWidths = [380, 150, 180, 130];
+    const _startWidths = [760, 150, 180, 130];
     const _gap0 = 80;
     let _bx0 = 0;
     for (const _bw0 of _startWidths) {
@@ -752,6 +799,21 @@ function initLevel() {
       if (_bx0 > W + 200) break;
     }
     spawner.cd = 55; // first dynamic bridge arrives before pre-spawned ones exit
+  } else if (LEVEL_CFG[level - 1].buildingLevel) {
+    ditches.push({ x: -W, w: W * 200 }); // entire level is void
+    // Pre-fill visible area with starting buildings
+    const _sb = [
+      { x: 0,    w: 580, y: GROUND_Y - 100 },
+      { x: 610,  w: 140, y: GROUND_Y - 140 },
+      { x: 770,  w: 160, y: GROUND_Y - 120 },
+      { x: 950,  w: 130, y: GROUND_Y - 100 },
+      { x: 1100, w: 150, y: GROUND_Y - 160 },
+    ];
+    for (const b of _sb) obstacles.push({ x: b.x, y: b.y, w: b.w, type: 'skyscraper' });
+    spawner.cd = 55; // gap to first dynamic building ≈ 30 px
+    spawner.lastBuildY = GROUND_Y - 100;
+    // Place players on top of first building
+    for (const p of players) { p.y = GROUND_Y - 100; p.onGround = true; }
   }
 }
 
@@ -778,6 +840,15 @@ function update() {
     if (swapFrames === 0 && players.length >= 2) {
       players[0].animalIdx = _swapOrig[0];
       players[1].animalIdx = _swapOrig[1];
+    }
+  }
+  for (let pi = 0; pi < players.length; pi++) {
+    if (morphFrames[pi] > 0) {
+      morphFrames[pi]--;
+      if (morphFrames[pi] === 0 && _morphOrig[pi] >= 0) {
+        players[pi].animalIdx = _morphOrig[pi];
+        _morphOrig[pi] = -1;
+      }
     }
   }
   let speedMult = 1 + rocketFade;
@@ -840,6 +911,11 @@ function updateWorld(cfg) {
     const d = ditches[i];
     d.x -= cfg.speed;
     if (d.x + d.w <= -10) ditches.splice(i, 1);
+  }
+  // Snowballs — fly left faster than world scroll
+  for (let i = snowballs.length - 1; i >= 0; i--) {
+    snowballs[i].x -= cfg.speed + 2.5;
+    if (snowballs[i].x < -40) snowballs.splice(i, 1);
   }
   // Explosion particles — move and cull in one pass
   for (let i = particles.length - 1; i >= 0; i--) {
@@ -940,6 +1016,42 @@ function updateCollectibles(cfg) {
     }
   }
 
+  for (let i = morphItems.length - 1; i >= 0; i--) {
+    const m = morphItems[i];
+    m.x -= cfg.speed;
+    if (m.x < -20) { morphItems.splice(i, 1); continue; }
+    let collected = false;
+    for (let pi = 0; pi < players.length; pi++) {
+      const p = players[pi];
+      if (Math.abs(p.x - m.x) < halfP + 14 && Math.abs((p.y - halfP) - m.y) < halfP + 14) {
+        collected = true; break;
+      }
+    }
+    if (collected) {
+      // If swap is active, cancel it immediately so animals are back to true originals
+      if (swapFrames > 0 && players.length >= 2) {
+        players[0].animalIdx = _swapOrig[0];
+        players[1].animalIdx = _swapOrig[1];
+        swapFrames = 0;
+      }
+      // True originals — always the selected animal, unaffected by swap or previous morphs
+      const trueOrig = [selAnimal, selAnimal2];
+      for (let pj = 0; pj < players.length; pj++) {
+        _morphOrig[pj] = trueOrig[pj];
+        let newAnimal;
+        // Exclude all players' true originals so no player gets another player's animal
+        do { newAnimal = Math.floor(Math.random() * ANIMALS.length); }
+        while (trueOrig.slice(0, players.length).includes(newAnimal));
+        players[pj].animalIdx = newAnimal;
+        morphFrames[pj] = 600;
+        popups.push({ x: m.x + (pj === 1 ? 30 : -30), y: m.y - 10 - pj * 22,
+                      text: `🎭 ${ANIMALS[newAnimal].name}!`, life: 90, color: '#ff88ff' });
+      }
+      playPotion();
+      morphItems.splice(i, 1);
+    }
+  }
+
   for (let i = diamonds.length - 1; i >= 0; i--) {
     const d = diamonds[i];
     d.x -= cfg.speed;
@@ -965,18 +1077,20 @@ function updateEnemies(cfg) {
     // ── Kangaroo: bounces left/right ─────────────────────────────────────────
     if (o.type === 'kangaroo') {
       const groundY = GROUND_Y - o.h;
-      const isBridge = LEVEL_CFG[level - 1].bridgeLevel;
+      const isBridge   = LEVEL_CFG[level - 1].bridgeLevel;
+      const isBuilding = LEVEL_CFG[level - 1].buildingLevel;
+      const isVoid     = isBridge || isBuilding;
       if (o.jumpTimer > 0) {
         o.jumpTimer--;
-        // Bridge-edge check: bias next jump toward bridge center
-        if (isBridge && o.bridgeObj) {
-          if (o.x < o.bridgeObj.x + 8)                      o.jumpVxBias =  1;
+        // Edge-check on bridge/rooftop: bias next jump toward platform center
+        if (isVoid && o.bridgeObj) {
+          if (o.x < o.bridgeObj.x + 8)                           o.jumpVxBias =  1;
           else if (o.x + o.w > o.bridgeObj.x + o.bridgeObj.w - 8) o.jumpVxBias = -1;
-          else                                                o.jumpVxBias =  0;
+          else                                                     o.jumpVxBias =  0;
         }
       } else if (o.jumpTimer === 0) {
         o.vy = -(9 + Math.random() * 2);
-        const bias = isBridge ? (o.jumpVxBias || 0) : 0;
+        const bias = isVoid ? (o.jumpVxBias || 0) : 0;
         o.vx = bias !== 0
           ? bias * (0.6 + Math.random() * 1.2)
           : (Math.random() < 0.5 ? -1 : 1) * (0.8 + Math.random() * 1.4);
@@ -985,12 +1099,12 @@ function updateEnemies(cfg) {
         o.vy += GRAVITY;
         o.y  += o.vy;
         o.x  += o.vx;
-        if (isBridge) {
-          // Land on bridge surface; fall into lava if no bridge below
+        if (isVoid) {
+          // Land on bridge/rooftop surface; fall into void if nothing below
           let landed = false;
           if (o.vy >= 0) {
             for (const b of obstacles) {
-              if (b.type !== 'bridge') continue;
+              if (b.type !== 'bridge' && b.type !== 'skyscraper') continue;
               if (o.x + o.w > b.x + 4 && o.x < b.x + b.w - 4 && o.y >= b.y - o.h) {
                 o.y = b.y - o.h;
                 o.vy = 0; o.vx = 0;
@@ -1002,7 +1116,7 @@ function updateEnemies(cfg) {
               }
             }
           }
-          if (!landed && o.y > H + 60) o.x = -600; // fell into lava
+          if (!landed && o.y > H + 60) o.x = -600; // fell into void
         } else if (o.y >= groundY) {
           o.y = groundY;
           o.vy = 0; o.vx = 0;
@@ -1039,7 +1153,8 @@ function updateSpawner(cfg) {
   // Main spawn stream
   spawner.cd--;
   if (spawner.cd <= 0 && frame < flagSpawnFrame - clearZoneFrames) {
-    if (LEVEL_CFG[level - 1].bridgeLevel) spawnNextBridge(cfg);
+    if (LEVEL_CFG[level - 1].bridgeLevel)   spawnNextBridge(cfg);
+    else if (LEVEL_CFG[level - 1].buildingLevel) spawnNextBuilding(cfg);
     else spawnNext(cfg);
   }
 
@@ -1084,6 +1199,23 @@ function updateSpawner(cfg) {
       spawner.swapSpawned = true;
     }
   }
+  // Morph item: every level, shortly before half-time
+  if (!spawner.morphSpawned && frame >= 800 && frame <= 1100) {
+    if (obstaclesClearAt(W + 20, 90)) {
+      morphItems.push({ x: W + 20, y: GROUND_Y - 95 });
+      spawner.morphSpawned = true;
+    }
+  }
+  // Snowballs: level 10 only — independent of obstacle stream
+  if (level === 10) {
+    spawner.snowballCD--;
+    if (spawner.snowballCD <= 0 && frame < flagSpawnFrame - clearZoneFrames) {
+      const SNOW_Y = [GROUND_Y - 18, GROUND_Y - 60, GROUND_Y - 103];
+      const h = SNOW_Y[Math.floor(spawnRng() * 3)];
+      snowballs.push({ x: W + 20, y: h, r: 18 });
+      spawner.snowballCD = 80 + Math.floor(spawnRng() * 80);
+    }
+  }
 }
 
 function updateCollisions() {
@@ -1102,7 +1234,7 @@ function updateCollisions() {
       }
     } else if (p.invFrames === 0) {
       for (const o of obstacles) {
-        if (o.type === 'flag' || o.type === 'platform' || o.type === 'bridge') continue;
+        if (o.type === 'flag' || o.type === 'platform' || o.type === 'bridge' || o.type === 'skyscraper') continue;
         if (!overlaps(p, o)) continue;
         if (o.type === 'box') {
           if (p.vy >= 0 && p.y > o.y + 5) {
@@ -1124,6 +1256,33 @@ function updateCollisions() {
         }
         break;
       }
+    }
+
+    // Snowball collisions — level 10 (independent of invFrames/rocket check above)
+    for (let i = snowballs.length - 1; i >= 0; i--) {
+      const sb = snowballs[i];
+      const px1 = p.x - BOX_W / 2 + 4, px2 = p.x + BOX_W / 2 - 4;
+      const py1 = p.y - BOX_H + 4,      py2 = p.y - 4;
+      const ncx = Math.max(px1, Math.min(px2, sb.x));
+      const ncy = Math.max(py1, Math.min(py2, sb.y));
+      const ddx = sb.x - ncx, ddy = sb.y - ncy;
+      if (ddx * ddx + ddy * ddy > sb.r * sb.r) continue;
+      if (p.rocketFrames > 0) {
+        snowballs.splice(i, 1);
+      } else if (!p.onGround && p.vy > 0 && p.y - BOX_H < sb.y) {
+        addScore(150);
+        popups.push({ x: sb.x, y: sb.y - 20, text: '+150', life: 55, color: '#ffffff' });
+        p.vy = JUMP_VY * 0.6;
+        snowballs.splice(i, 1);
+        playPunch();
+      } else if (p.invFrames === 0) {
+        snowballs.splice(i, 1);
+        lives--;
+        p.invFrames = 110;
+        flashFrames = 18;
+        if (lives <= 0) gs = 'gameover';
+      }
+      break;
     }
   }
 }
@@ -1211,7 +1370,7 @@ function updatePlayer(p, cfg) {
   p.vx = rightKey ? MOVE_SPEED : leftKey ? -MOVE_SPEED : 0;
   p.x  = Math.max(PLAYER_SIZE / 2 + 4, Math.min(W - PLAYER_SIZE / 2 - 4, p.x + p.vx));
 
-  const aboveDitch = ditches.some(d => p.x > d.x + 8 && p.x < d.x + d.w - 8);
+  const aboveDitch = ditches.some(d => !(d.frozenUntil && frame < d.frozenUntil) && p.x > d.x + 8 && p.x < d.x + d.w - 8);
   const overDitch  = prevY > GROUND_Y || aboveDitch;
 
   if (aboveDitch && !p.onGround) p.pendingDitchBonus = true;
@@ -1235,14 +1394,14 @@ function updatePlayer(p, cfg) {
 
   if (!p.onGround && p.vy >= 0) {
     for (const o of obstacles) {
-      if (o.type !== 'box' && o.type !== 'platform' && o.type !== 'bridge') continue;
+      if (o.type !== 'box' && o.type !== 'platform' && o.type !== 'bridge' && o.type !== 'skyscraper') continue;
       const pL = p.x - PLAYER_SIZE / 2 + 8;
       const pR = p.x + PLAYER_SIZE / 2 - 8;
       if (pR > o.x && pL < o.x + o.w && p.y >= o.y && prevY <= o.y + 6) {
         p.y = o.y;
         const _isP1b = p === players[0];
         const _dnKey = _isP1b ? keys['ArrowDown'] : keys['KeyS'];
-        if (o.type !== 'bridge' && !o.trampoline && p.animalIdx === 3 && _dnKey && p.donkeyBoxCD === 0) {
+        if (o.type !== 'bridge' && o.type !== 'skyscraper' && !o.trampoline && p.animalIdx === 3 && _dnKey && p.donkeyBoxCD === 0) {
           // Donkey ground-pound: explode box, bounce up, 25 pts
           explodeBox(o);
           p.vy        = JUMP_VY * 1.15;
@@ -1293,7 +1452,8 @@ function updatePlayer(p, cfg) {
   if (p.scratchCooldown > 0) p.scratchCooldown--;
   if (p.donkeyBoxCD    > 0) p.donkeyBoxCD--;
   if (p.wolfCooldown   > 0) p.wolfCooldown--;
-  if (p.moleCooldown   > 0) { p.moleCooldown--; if (p.moleCooldown === 0) p.moleBoxes = 5; }
+  if (p.moleCooldown      > 0) { p.moleCooldown--; if (p.moleCooldown === 0) p.moleBoxes = 5; }
+  if (p.leopardCooldown   > 0) p.leopardCooldown--;
 
   if (p.animalIdx === 1 && p.barkCooldown === 0 && p.floatFrames === 0 && p.rocketFrames === 0 && _dnKeySa) {
     // Dog bark: freeze all visible enemies for 90 frames
@@ -1313,12 +1473,33 @@ function updatePlayer(p, cfg) {
     playPling();
   }
 
-  if (p.animalIdx === 4 && p.wolfCooldown === 0 && p.floatFrames === 0 && p.rocketFrames === 0 && _dnKeySa) {
-    // Wolf howl: summon shadow wolf that sweeps the screen from right to left
-    shadowWolves.push({ x: W + 58, y: GROUND_Y, w: 58, h: 62, owner: p });
-    p.wolfCooldown = 288;
+  if (p.animalIdx === 4 && p.wolfCooldown === 0 && p.wolfCharges > 0 && p.floatFrames === 0 && p.rocketFrames === 0 && _dnKeySa) {
+    // Wolf howl: destroy all visible boxes + freeze all visible ditches
+    for (const o of obstacles) {
+      if (o.type !== 'box') continue;
+      if (o.x + (o.w || 44) < 0 || o.x > W) continue;
+      explodeBox(o);
+    }
+    for (const d of ditches) {
+      if (d.x + d.w < 0 || d.x > W) continue;
+      d.frozenUntil = frame + 480; // 8 seconds
+    }
+    p.wolfCooldown = 300; // 5s cooldown between uses
+    p.wolfCharges--;
     playPunch();
-    popups.push({ x: p.x, y: p.y - 50, text: 'AUUU!', life: 60, color: '#ccccff' });
+    popups.push({ x: p.x, y: p.y - 50, text: 'AUUU!', life: 80, color: '#aaddff' });
+  }
+
+  if (p.animalIdx === 6 && p.leopardCooldown === 0 && p.floatFrames === 0 && p.rocketFrames === 0 && _dnKeySa) {
+    // Leopard super-jump: reaches full world height (GROUND_Y px)
+    p.vy = -Math.sqrt(GROUND_Y); // ≈ −21.5, peaks at exactly GROUND_Y above ground
+    p.jumpHeld = false;
+    p.jumpBoost = 0;
+    p.onGround = false;
+    p.doubleJumped = true; // consume double-jump slot so fox logic doesn't interfere
+    p.leopardCooldown = 300; // 5 s
+    playJump();
+    popups.push({ x: p.x, y: p.y - 50, text: '🐆!', life: 50, color: '#FFD700' });
   }
 }
 
@@ -1350,7 +1531,8 @@ const BOX_W = 44, BOX_H = 46;
 
 // ── Bridge-level spawn stream (level 9) ──────────────────────────────────────
 // Three height levels reachable by jumping
-const BRIDGE_HEIGHTS = [GROUND_Y, GROUND_Y - 90, GROUND_Y - 150];
+const BRIDGE_HEIGHTS   = [GROUND_Y, GROUND_Y - 90, GROUND_Y - 150];
+const BUILDING_HEIGHTS = [GROUND_Y - 100, GROUND_Y - 180, GROUND_Y - 260];
 
 function spawnNextBridge(cfg) {
   // Choose height: step up, stay, or step down from previous bridge
@@ -1419,8 +1601,77 @@ function spawnNextBridge(cfg) {
 
   // Gap: smaller when jumping up, normal otherwise
   const heightRise = BRIDGE_HEIGHTS[curIdx] - by; // positive = going up
-  const gapBase    = 70 + Math.floor(spawnRng() * 46);   // 70–115 px
-  const gap        = Math.max(50, gapBase - Math.floor(heightRise * 0.22));
+  const gapBase    = 130 + Math.floor(spawnRng() * 60);   // 130–189 px
+  const gap        = Math.max(120, gapBase - Math.floor(heightRise * 0.22));
+  // Pink trampoline pads at right edge of bridge for wide gaps
+  if (gap > 90) {
+    for (let t = 0; t < 2; t++) {
+      obstacles.push({
+        x: W + 20 + bw + t * BOX_W,
+        y: by,
+        w: BOX_W, h: BOX_H,
+        type: 'box', trampoline: true,
+      });
+    }
+  }
+  spawner.cd = Math.round((bw + gap) / cfg.speed);
+}
+
+function spawnNextBuilding(cfg) {
+  const curIdx  = Math.max(0, BUILDING_HEIGHTS.indexOf(spawner.lastBuildY));
+  const step    = Math.floor(spawnRng() * 3) - 1;
+  const nextIdx = Math.max(0, Math.min(BUILDING_HEIGHTS.length - 1, curIdx + step));
+  const by      = BUILDING_HEIGHTS[nextIdx];
+  const bw      = 80 + Math.floor(spawnRng() * 121); // 80–200 px
+  const building = { x: W + 20, y: by, w: bw, type: 'skyscraper' };
+  obstacles.push(building);
+  spawner.lastBuildY = by;
+
+  // Kangaroo on rooftop (9 %)
+  if (spawnRng() < 0.09) {
+    const kw = 52, kh = 68;
+    obstacles.push({
+      x: building.x + Math.floor(spawnRng() * Math.max(1, bw - kw)),
+      y: by - kh, w: kw, h: kh, type: 'kangaroo',
+      vy: 0, vx: 0, jumpTimer: 30 + Math.floor(spawnRng() * 30),
+      bridgeObj: building, jumpVxBias: 0,
+    });
+  }
+  // Vulture (6 %)
+  if (spawnRng() < 0.06 && spawner.lastType !== 'vulture') {
+    const vw = 68, vh = 44;
+    const vYLow  = by - 65;
+    const vYHigh = Math.max(30, by - 185);
+    obstacles.push({ x: building.x + bw / 2 - vw / 2,
+      y: vYHigh + Math.floor(spawnRng() * Math.max(1, vYLow - vYHigh)),
+      yLow: vYLow, yHigh: vYHigh, w: vw, h: vh, type: 'vulture',
+      state: 'top', stateTimer: 50 + Math.floor(spawnRng() * 40),
+      waitBot: 60 + Math.floor(spawnRng() * 60), waitTop: 50 + Math.floor(spawnRng() * 50), flySpeed: 2.5 });
+    spawner.lastType = 'vulture';
+  } else { spawner.lastType = 'building'; }
+
+  // Collectibles on rooftop surface
+  if (spawner.diamondBudget > 0 && spawnRng() < 0.55) {
+    const count = 1 + Math.floor(spawnRng() * 3);
+    for (let i = 0; i < count && spawner.diamondBudget > 0; i++) {
+      diamonds.push({ x: building.x + 15 + i * 28, y: by - 20, color: DIAMOND.box.color, pts: DIAMOND.box.pts });
+      spawner.diamondBudget--;
+    }
+  }
+  if (!spawner.potionSpawned && spawnRng() < 0.18) {
+    potions.push({ x: building.x + bw / 2, y: by - 28 }); spawner.potionSpawned = true;
+  }
+  if (spawner.rocketCount < (twoPlayer ? 2 : 1) && spawnRng() < 0.12) {
+    rockets.push({ x: building.x + bw / 2, y: by - 30 }); spawner.rocketCount++;
+  }
+  if (!heartSpawned && spawnRng() < 0.22) {
+    hearts.push({ x: building.x + bw * 0.6, y: by - 38 }); heartSpawned = true;
+  }
+
+  // Gap: narrower when going up (harder), wider when descending
+  const heightRise = BUILDING_HEIGHTS[curIdx] - by; // positive = going up
+  const gapBase    = 40 + Math.floor(spawnRng() * 46); // 40–85 px
+  const gap        = Math.max(30, gapBase - Math.floor(heightRise * 0.3));
   spawner.cd = Math.round((bw + gap) / cfg.speed);
 }
 
@@ -1702,7 +1953,7 @@ function spawnPlatform(n) {
 // Returns true when no enemy/box obstacle occupies a horizontal window of ±margin around x
 function obstaclesClearAt(x, margin) {
   return !obstacles.some(o => {
-    if (o.type === 'flag' || o.type === 'platform' || o.type === 'bridge') return false;
+    if (o.type === 'flag' || o.type === 'platform' || o.type === 'bridge' || o.type === 'skyscraper') return false;
     const oc = o.x + (o.w || 0) / 2;
     return oc > 0 && Math.abs(oc - x) < margin;
   });
@@ -1774,6 +2025,8 @@ function draw() {
   drawClocks();
   drawHourglasses();
   drawSwapItems();
+  drawMorphItems();
+  drawSnowballs();
   drawParticles();
   drawShadowWolves();
   drawYarnBalls();
@@ -1813,11 +2066,87 @@ function draw() {
 function drawBackground() {
   const cfg = LEVEL_CFG[level - 1];
 
-  // Sky gradient (cached in initLevel, no per-frame allocation)
-  ctx.fillStyle = skyGradient;
-  ctx.fillRect(0, 0, W, GROUND_Y);
+  // Sky gradient (cached in initLevel; level 11 uses a per-frame dynamic one)
+  if (level !== 11 && level !== 12 && level !== 13) {
+    ctx.fillStyle = skyGradient;
+    ctx.fillRect(0, 0, W, GROUND_Y);
+  }
 
-  if (level === 6) {
+  if (level === 11 || level === 12) {
+    // Dark→bright→dark→bright forest (2 full cycles over the level)
+    const t11 = (1 - Math.cos(frame * 0.00524)) / 2; // 0=night, 1=day
+    const lv11 = (n, d) => Math.round(n + (d - n) * t11);
+    // Sky colours
+    const s1 = `rgb(${lv11(5,135)},${lv11(12,206)},${lv11(20,235)})`;
+    const s2 = `rgb(${lv11(10,201)},${lv11(25,234)},${lv11(18,255)})`;
+    const dg = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+    dg.addColorStop(0, s1); dg.addColorStop(1, s2);
+    ctx.fillStyle = dg; ctx.fillRect(0, 0, W, GROUND_Y);
+    // Stars + moon (fade out as day comes)
+    if (t11 < 0.55) {
+      const starA = Math.max(0, (0.55 - t11) / 0.55);
+      for (let i = 0; i < 30; i++) {
+        const sx = (i * 239 + 17) % W;
+        const sy = (i * 83 + 13) % Math.round(GROUND_Y * 0.65);
+        ctx.fillStyle = `rgba(220,235,255,${(starA * (0.25 + (i % 3) * 0.12)).toFixed(2)})`;
+        ctx.beginPath(); ctx.arc(sx, sy, 0.9, 0, Math.PI * 2); ctx.fill();
+      }
+      const moonA = starA * 0.92;
+      ctx.fillStyle = `rgba(216,216,240,${moonA.toFixed(2)})`;
+      ctx.beginPath(); ctx.arc(W - 80, 58, 22, 0, Math.PI * 2); ctx.fill();
+    }
+    // Sun (fades in after t11 > 0.45)
+    if (t11 > 0.45) {
+      const sunA = Math.min(1, (t11 - 0.45) / 0.25);
+      ctx.globalAlpha = sunA;
+      const sunX = W - 80, sunY = 58;
+      for (let i = 5; i >= 1; i--) {
+        ctx.fillStyle = cfg.sunGlow + (0.06 * i) + ')';
+        ctx.beginPath(); ctx.arc(sunX, sunY, 32 + i * 10, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.fillStyle = cfg.sunColor;
+      ctx.beginPath(); ctx.arc(sunX, sunY, 32, 0, Math.PI * 2); ctx.fill();
+      ctx.globalAlpha = 1;
+      for (const c of clouds) drawCloud(c.x, c.y, c.r, false);
+    }
+    // Forest with brightness-lerped colours
+    const tR = lv11(15,40), tG = lv11(10,28), tB = lv11(8,14);
+    const cR = lv11(8,34),  cG = lv11(20,80), cB = lv11(8,28);
+    const bkA  = (lv11(20, 50) / 100).toFixed(2);
+    const bkCA = (lv11(18, 45) / 100).toFixed(2);
+    const ftA  = (lv11(40, 70) / 100).toFixed(2);
+    const ftCA = (lv11(35, 65) / 100).toFixed(2);
+    const tDark = `rgba(${Math.round(tR*.75)},${Math.round(tG*.75)},${Math.round(tB*.75)}`;
+    const cDark = `rgba(${Math.round(cR*.65)},${Math.round(cG*.75)},${Math.round(cB*.65)}`;
+    drawForestLayer(FOREST_BACK,  0.18, `rgba(${tR},${tG},${tB},${bkA})`,  `rgba(${cR},${cG},${cB},${bkCA})`);
+    drawForestLayer(FOREST_FRONT, 0.38, `${tDark},${ftA})`, `${cDark},${ftCA})`);
+    if (level === 12) drawFog(t11);
+  } else if (level === 13) {
+    // City building level: dark urban night → hazy day cycle + fog
+    const t13 = (1 - Math.cos(frame * 0.00524)) / 2;
+    const lv13 = (n, d) => Math.round(n + (d - n) * t13);
+    const s1 = `rgb(${lv13(4,90)},${lv13(8,100)},${lv13(16,130)})`;
+    const s2 = `rgb(${lv13(10,110)},${lv13(20,125)},${lv13(30,155)})`;
+    const dg13 = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+    dg13.addColorStop(0, s1); dg13.addColorStop(1, s2);
+    ctx.fillStyle = dg13; ctx.fillRect(0, 0, W, GROUND_Y);
+    // Stars + moon at night
+    if (t13 < 0.5) {
+      const starA = (0.5 - t13) / 0.5;
+      for (let i = 0; i < 25; i++) {
+        const sx = (i * 239 + 17) % W, sy = (i * 83 + 13) % Math.round(GROUND_Y * 0.6);
+        ctx.fillStyle = `rgba(220,230,255,${(starA * (0.25 + (i % 3) * 0.12)).toFixed(2)})`;
+        ctx.beginPath(); ctx.arc(sx, sy, 0.8, 0, Math.PI * 2); ctx.fill();
+      }
+      const moonA = starA * 0.85;
+      ctx.fillStyle = `rgba(210,215,240,${moonA.toFixed(2)})`;
+      ctx.beginPath(); ctx.arc(W - 80, 58, 22, 0, Math.PI * 2); ctx.fill();
+    }
+    // Background city silhouettes
+    drawSkyscrapers();
+    // Fog drifting between buildings
+    drawFog(t13);
+  } else if (level === 6) {
     // Moon
     const moonX = W - 80, moonY = 58;
     ctx.fillStyle = 'rgba(180,180,220,0.12)';
@@ -1846,6 +2175,9 @@ function drawBackground() {
   } else if (LEVEL_CFG[level - 1].bridgeLevel) {
     // Lava chasm: no sun, heat glow rising, floating embers
     drawLavaChasm();
+  } else if (level >= 10) {
+    // Dawn arctic: stars fading, aurora dimmed, sun rising on horizon
+    drawDawnArctic();
   } else if (level >= 8) {
     // North Pole: aurora borealis, pale moon, snow drifts
     const moonX = W - 80, moonY = 58;
@@ -1891,46 +2223,82 @@ function drawBackground() {
   }
 
   // Ground — drawn in segments, with gaps for ditches
-  ctx.fillStyle = cfg.ground;
+  if (level === 11 || level === 12) {
+    const t11g = (1 - Math.cos(frame * 0.00524)) / 2;
+    const lv = (n, d) => Math.round(n + (d - n) * t11g);
+    ctx.fillStyle = `rgb(${lv(12,74)},${lv(28,138)},${lv(8,42)})`;
+  } else {
+    ctx.fillStyle = cfg.ground;
+  }
   let gx = 0;
   // Ditches are already in left→right order (spawned sequentially, scrolled at same speed)
   for (const d of ditches) {
-    const dx = Math.max(0, d.x);
+    const frozen = d.frozenUntil && frame < d.frozenUntil;
+    const dx  = Math.max(0, d.x);
+    const dxr = Math.min(W, d.x + d.w);
     if (dx > gx) ctx.fillRect(gx, GROUND_Y, dx - gx, H - GROUND_Y);
-    gx = Math.min(W, d.x + d.w);
+    gx = dxr;
   }
   if (gx < W) ctx.fillRect(gx, GROUND_Y, W - gx, H - GROUND_Y);
 
-  // Ditch: dark abyss + glowing floor + edge walls
+  // Ditch: dark abyss + glowing floor + edge walls (or frozen ice surface)
   for (const d of ditches) {
     const dx = Math.max(0, d.x);
     const dw = Math.min(W, d.x + d.w) - dx;
     if (dw <= 0) continue;
 
-    // Abyss background
-    ctx.fillStyle = '#060008';
-    ctx.fillRect(dx, GROUND_Y, dw, H - GROUND_Y);
-
-    // Depth glow at bottom (lava-like on high levels, cold blue on low)
-    const glowColor = level >= 4 ? 'rgba(200,40,0,0.55)' : 'rgba(60,0,120,0.45)';
-    ctx.fillStyle = glowColor;
-    ctx.fillRect(dx, H - 28, dw, 28);
-
-    // Left wall
-    ctx.fillStyle = '#333';
-    ctx.fillRect(dx, GROUND_Y, 4, H - GROUND_Y);
-    // Right wall
-    ctx.fillStyle = '#222';
-    ctx.fillRect(Math.min(W, d.x + d.w) - 4, GROUND_Y, 4, H - GROUND_Y);
+    const frozen = d.frozenUntil && frame < d.frozenUntil;
+    if (frozen) {
+      // Ice surface — solid walkable ground
+      ctx.fillStyle = '#a8d8f0';
+      ctx.fillRect(dx, GROUND_Y, dw, H - GROUND_Y);
+      // Ice sheen highlight
+      ctx.fillStyle = 'rgba(255,255,255,0.35)';
+      ctx.fillRect(dx, GROUND_Y, dw, 8);
+      // Crack lines for icy texture
+      ctx.strokeStyle = 'rgba(180,220,255,0.55)';
+      ctx.lineWidth = 1;
+      for (let cx2 = dx + 18; cx2 < dx + dw - 8; cx2 += 22) {
+        ctx.beginPath();
+        ctx.moveTo(cx2, GROUND_Y + 10);
+        ctx.lineTo(cx2 + 8, GROUND_Y + 28);
+        ctx.lineTo(cx2 - 4, GROUND_Y + 44);
+        ctx.stroke();
+      }
+      // Fade-out warning when <2s left
+      const remaining = d.frozenUntil - frame;
+      if (remaining < 120) {
+        const alpha = (remaining % 20 < 10) ? 0.3 : 0;
+        ctx.fillStyle = `rgba(0,60,120,${alpha})`;
+        ctx.fillRect(dx, GROUND_Y, dw, H - GROUND_Y);
+      }
+    } else {
+      // Abyss background
+      ctx.fillStyle = '#060008';
+      ctx.fillRect(dx, GROUND_Y, dw, H - GROUND_Y);
+      // Depth glow at bottom (lava-like on high levels, cold blue on low)
+      const glowColor = level >= 4 ? 'rgba(200,40,0,0.55)' : 'rgba(60,0,120,0.45)';
+      ctx.fillStyle = glowColor;
+      ctx.fillRect(dx, H - 28, dw, 28);
+      // Left wall
+      ctx.fillStyle = '#333';
+      ctx.fillRect(dx, GROUND_Y, 4, H - GROUND_Y);
+      // Right wall
+      ctx.fillStyle = '#222';
+      ctx.fillRect(Math.min(W, d.x + d.w) - 4, GROUND_Y, 4, H - GROUND_Y);
+    }
   }
 
   // Ground top edge line
   ctx.fillStyle = 'rgba(0,0,0,0.18)';
   gx = 0;
   for (const d of ditches) {
-    const dx = Math.max(0, d.x);
+    const frozen = d.frozenUntil && frame < d.frozenUntil;
+    const dx  = Math.max(0, d.x);
+    const dxr = Math.min(W, d.x + d.w);
     if (dx > gx) ctx.fillRect(gx, GROUND_Y, dx - gx, 4);
-    gx = Math.min(W, d.x + d.w);
+    if (frozen) ctx.fillRect(dx, GROUND_Y, dxr - dx, 4); // edge over ice too
+    gx = dxr;
   }
   if (gx < W) ctx.fillRect(gx, GROUND_Y, W - gx, 4);
 }
@@ -2099,6 +2467,121 @@ function drawLavaChasm() {
     ctx.beginPath();
     ctx.arc(ex, ey, 1.2 + (i % 3) * 0.5, 0, Math.PI * 2);
     ctx.fill();
+  }
+}
+
+// ── Dawn arctic background (level 10) ────────────────────────────────────────
+function drawDawnArctic() {
+  // A few faint stars — most washed out by dawn light
+  for (let i = 0; i < 18; i++) {
+    const sx = (i * 239 + 17) % W;
+    const sy = (i * 83 + 13) % Math.round(GROUND_Y * 0.45);
+    ctx.fillStyle = `rgba(210,210,255,${0.10 + (i % 3) * 0.08})`;
+    ctx.beginPath();
+    ctx.arc(sx, sy, 0.7, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // Faint aurora bands (dimmed by dawn)
+  const aScroll = hillOff * 0.18;
+  const bands = [
+    { y: 65,  h: 30, r: 30,  g: 180, b: 100, amp: 12, freq: 0.012 },
+    { y: 92,  h: 22, r: 40,  g: 150, b: 200, amp:  9, freq: 0.016 },
+  ];
+  for (const band of bands) {
+    ctx.beginPath();
+    ctx.moveTo(0, band.y);
+    for (let x = 0; x <= W; x += 6)
+      ctx.lineTo(x, band.y + Math.sin((x + aScroll) * band.freq) * band.amp);
+    for (let x = W; x >= 0; x -= 6)
+      ctx.lineTo(x, band.y + band.h + Math.sin((x + aScroll) * band.freq + 1.2) * band.amp);
+    ctx.closePath();
+    ctx.fillStyle = `rgba(${band.r},${band.g},${band.b},0.14)`;
+    ctx.fill();
+  }
+  // Horizon dawn glow — sun just peeking up
+  const sunX = W * 0.5;
+  const grad = ctx.createRadialGradient(sunX, GROUND_Y, 0, sunX, GROUND_Y, 200);
+  grad.addColorStop(0, 'rgba(255,180,80,0.55)');
+  grad.addColorStop(0.4, 'rgba(220,100,60,0.25)');
+  grad.addColorStop(1, 'rgba(140,40,80,0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, GROUND_Y - 200, W, 200);
+  // Sun disc (half above horizon)
+  for (let i = 5; i >= 1; i--) {
+    ctx.fillStyle = `rgba(255,180,80,${0.07 * i})`;
+    ctx.beginPath(); ctx.arc(sunX, GROUND_Y, 20 + i * 18, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.fillStyle = '#FFB870';
+  ctx.beginPath(); ctx.arc(sunX, GROUND_Y, 20, 0, Math.PI, true); ctx.fill();
+  // Snow drifts
+  const sScroll = (hillOff * 0.30) % W;
+  ctx.fillStyle = 'rgba(240,248,255,0.28)';
+  for (let rep = -1; rep <= 1; rep++) {
+    for (let i = 0; i < 6; i++) {
+      const x = (i * 185 + 60) - sScroll + rep * W;
+      ctx.beginPath(); ctx.arc(x, GROUND_Y, 68, Math.PI, 0); ctx.fill();
+    }
+  }
+}
+
+// ── Fog (level 12) ───────────────────────────────────────────────────────────
+// t: 0=night, 1=day — tints fog blue-grey at night, warm white at day
+function drawFog(t) {
+  // 4 horizontal layers at different heights and drift speeds
+  const layers = [
+    { y: GROUND_Y - 28,  ry: 30, alpha: 0.22, mul: 0.13, gap: 340 },
+    { y: GROUND_Y - 105, ry: 22, alpha: 0.16, mul: 0.21, gap: 400 },
+    { y: GROUND_Y - 185, ry: 18, alpha: 0.12, mul: 0.09, gap: 300 },
+    { y: GROUND_Y - 255, ry: 14, alpha: 0.09, mul: 0.28, gap: 460 },
+  ];
+  // Night: cool blue-grey fog; Day: warm white fog
+  const fr = Math.round(210 + t * 15);
+  const fg = Math.round(218 + t * 10);
+  const fb = Math.round(235 - t * 5);
+  for (const l of layers) {
+    const off = (hillOff * l.mul) % l.gap;
+    ctx.fillStyle = `rgba(${fr},${fg},${fb},${l.alpha})`;
+    for (let rep = -1; rep <= 3; rep++) {
+      const cx = rep * l.gap - off;
+      ctx.beginPath();
+      ctx.ellipse(cx, l.y, l.gap * 0.62, l.ry, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // Overlap a shifted second ellipse per rep for denser, patchy look
+      ctx.beginPath();
+      ctx.ellipse(cx + l.gap * 0.48, l.y + l.ry * 0.3, l.gap * 0.45, l.ry * 0.7, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
+// ── Snowballs (level 10) ──────────────────────────────────────────────────────
+function drawSnowballs() {
+  const trailSpeed = LEVEL_CFG[level - 1].speed + 2.5;
+  for (const sb of snowballs) {
+    // Drop shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.15)';
+    ctx.beginPath(); ctx.ellipse(sb.x, sb.y + sb.r, sb.r * 0.9, sb.r * 0.28, 0, 0, Math.PI * 2); ctx.fill();
+    // Motion trail (3 ghost dots behind = to the right)
+    for (let t = 1; t <= 3; t++) {
+      const alpha = 0.28 - t * 0.07;
+      ctx.fillStyle = `rgba(200,225,255,${alpha.toFixed(2)})`;
+      ctx.beginPath(); ctx.arc(sb.x + t * trailSpeed * 0.7, sb.y, sb.r * (0.55 - t * 0.12), 0, Math.PI * 2); ctx.fill();
+    }
+    // Outer glow
+    ctx.fillStyle = 'rgba(200,230,255,0.35)';
+    ctx.beginPath(); ctx.arc(sb.x, sb.y, sb.r + 5, 0, Math.PI * 2); ctx.fill();
+    // Main ball
+    ctx.fillStyle = '#eef6ff';
+    ctx.beginPath(); ctx.arc(sb.x, sb.y, sb.r, 0, Math.PI * 2); ctx.fill();
+    // Shading
+    const shade = ctx.createRadialGradient(sb.x - 4, sb.y - 4, 2, sb.x, sb.y, sb.r);
+    shade.addColorStop(0, 'rgba(255,255,255,0)');
+    shade.addColorStop(1, 'rgba(160,200,240,0.45)');
+    ctx.fillStyle = shade;
+    ctx.beginPath(); ctx.arc(sb.x, sb.y, sb.r, 0, Math.PI * 2); ctx.fill();
+    // Highlight
+    ctx.fillStyle = 'rgba(255,255,255,0.88)';
+    ctx.beginPath(); ctx.arc(sb.x - sb.r * 0.33, sb.y - sb.r * 0.32, sb.r * 0.26, 0, Math.PI * 2); ctx.fill();
   }
 }
 
@@ -2279,6 +2762,38 @@ function drawSwapItems() {
     ctx.moveTo(0, -5); ctx.lineTo(-3.5, 3); ctx.lineTo(3.5, 3);
     ctx.closePath(); ctx.fill();
     ctx.restore();
+    ctx.restore();
+  }
+}
+
+// ── Morph surprise item ───────────────────────────────────────────────────────
+function drawMorphItems() {
+  for (const m of morphItems) {
+    const bob  = Math.sin(frame * 0.09 + m.x * 0.01) * 5;
+    const spin = (frame * 0.04) % (Math.PI * 2);
+    ctx.save();
+    ctx.translate(m.x, m.y + bob);
+    // Rainbow glow rings
+    for (let r = 0; r < 3; r++) {
+      const hue = (frame * 3 + r * 60) % 360;
+      ctx.fillStyle = `hsla(${hue},100%,60%,${0.12 - r * 0.03})`;
+      ctx.beginPath(); ctx.arc(0, 0, 24 - r * 4, 0, Math.PI * 2); ctx.fill();
+    }
+    // Orb
+    ctx.beginPath(); ctx.arc(0, 0, 14, 0, Math.PI * 2);
+    const hue0 = (frame * 3) % 360;
+    const grad = ctx.createRadialGradient(-4, -4, 2, 0, 0, 14);
+    grad.addColorStop(0, `hsl(${hue0},100%,85%)`);
+    grad.addColorStop(1, `hsl(${(hue0 + 120) % 360},100%,50%)`);
+    ctx.fillStyle = grad;
+    ctx.shadowColor = `hsl(${hue0},100%,60%)`; ctx.shadowBlur = 16;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    // "?" glyph, spinning
+    ctx.rotate(spin);
+    ctx.fillStyle = 'rgba(255,255,255,0.95)';
+    ctx.font = 'bold 14px Arial'; ctx.textAlign = 'center';
+    ctx.fillText('?', 0, 5);
     ctx.restore();
   }
 }
@@ -2774,6 +3289,29 @@ function drawObstacles() {
       ctx.strokeStyle = 'rgba(100, 180, 255, 0.7)';
       ctx.lineWidth = 1;
       ctx.strokeRect(o.x + 0.5, o.y + 0.5, o.w - 1, o.h - 1);
+    } else if (o.type === 'skyscraper') {
+      const bx = o.x, by = o.y, bw = o.w;
+      const bh = H - by + 12; // fills canvas bottom
+      // Concrete body
+      ctx.fillStyle = '#1c1e30';
+      ctx.fillRect(bx, by, bw, bh);
+      // Darker concrete texture strips
+      ctx.fillStyle = '#161828';
+      for (let sy = by + 14; sy < H; sy += 22) ctx.fillRect(bx, sy, bw, 1);
+      // Window grid — deterministic lit/unlit per position
+      const ww = 6, wh = 8, wgx = 5, wgy = 5, wx0 = 5, wy0 = 6;
+      for (let r = 0; by + wy0 + r * (wh + wgy) < H - 4; r++) {
+        for (let c = 0; wx0 + c * (ww + wgx) < bw - wx0; c++) {
+          const lit = ((c * 7 + r * 13 + (bx * 0.05 | 0)) % 17) > 5;
+          ctx.fillStyle = lit ? (r % 3 === 0 ? '#ffe880' : '#ffd050') : '#0c0c1a';
+          ctx.fillRect(bx + wx0 + c * (ww + wgx), by + wy0 + r * (wh + wgy), ww, wh);
+        }
+      }
+      // Roof edge
+      ctx.fillStyle = '#2e3250';
+      ctx.fillRect(bx, by, bw, 5);
+      ctx.fillStyle = '#484c72';
+      ctx.fillRect(bx, by, bw, 2);
     } else if (o.type === 'bridge') {
       const bx = o.x, by = o.y, bw = o.w, bh = o.h;
       // Faint drop shadow
@@ -3042,7 +3580,54 @@ function drawMole(sw1, sw2, jump) {
   ctx.fillStyle=S; ctx.beginPath(); ctx.arc(9,-41,3,Math.PI,0); ctx.fill();
 }
 
-const DRAW_FUNS = [drawFox, drawDog, drawCat, drawDonkey, drawWolf, drawMole];
+function drawLeopard(sw1, sw2, jump) {
+  const F='#C89020', D='#7A5010', S='#1A1000', C='#F0D870', P='#FFB0A0';
+  // Legs
+  ctx.lineWidth=5; ctx.lineCap='round'; ctx.strokeStyle=D;
+  _l(-10,-14,jump?-8:sw1); _l(-6,-14,jump?-4:sw2);
+  _l(  8,-14,jump? 7:sw2); _l(12,-14,jump? 9:sw1);
+  // Long tail (curves upward and back)
+  ctx.strokeStyle=D; ctx.lineWidth=5; ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(-18,-19); ctx.bezierCurveTo(-36,-16,-46,-28,-34,-52); ctx.stroke();
+  ctx.strokeStyle=S; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(-22,-22); ctx.bezierCurveTo(-38,-20,-46,-30,-36,-50); ctx.stroke();
+  // Body
+  ctx.fillStyle=F; ctx.beginPath(); ctx.ellipse(-1,-22,21,11,0,0,Math.PI*2); ctx.fill();
+  // Belly highlight
+  ctx.fillStyle=C; ctx.beginPath(); ctx.ellipse(3,-19,11,6,0.15,0,Math.PI*2); ctx.fill();
+  // Spots on body
+  ctx.fillStyle=S;
+  for (const [bx,by,br] of [[-8,-26,3],[-14,-19,2.5],[2,-28,2.5],[4,-18,3],[-4,-14,2]]) {
+    ctx.beginPath(); ctx.arc(bx,by,br,0,Math.PI*2); ctx.fill();
+  }
+  // Head (slightly larger than cat)
+  ctx.fillStyle=F; ctx.beginPath(); ctx.arc(16,-33,13,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle=C; ctx.beginPath(); ctx.ellipse(23,-28,7,5,0,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle=P; ctx.beginPath(); ctx.arc(27,-28,2.2,0,Math.PI*2); ctx.fill();
+  // Spots on head
+  ctx.fillStyle=S;
+  for (const [hx,hy,hr] of [[10,-38,2],[18,-39,1.8],[22,-36,1.5]]) {
+    ctx.beginPath(); ctx.arc(hx,hy,hr,0,Math.PI*2); ctx.fill();
+  }
+  // Eye (amber leopard eye with slit)
+  ctx.fillStyle='#C86010'; ctx.beginPath(); ctx.ellipse(19,-34,3,3.5,0,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#111';    ctx.beginPath(); ctx.ellipse(19,-34,1,2.8,0,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#fff';    ctx.beginPath(); ctx.arc(20,-35,0.9,0,Math.PI*2); ctx.fill();
+  // Whiskers
+  ctx.strokeStyle='rgba(0,0,0,0.30)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(23,-27); ctx.lineTo(39,-25); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(23,-29); ctx.lineTo(39,-29); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(23,-31); ctx.lineTo(38,-34); ctx.stroke();
+  // Round ears
+  ctx.fillStyle=F;
+  ctx.beginPath(); ctx.moveTo(5,-41); ctx.lineTo(3,-56); ctx.lineTo(15,-43); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(16,-43); ctx.lineTo(21,-57); ctx.lineTo(25,-44); ctx.closePath(); ctx.fill();
+  ctx.fillStyle=P;
+  ctx.beginPath(); ctx.moveTo(6,-42); ctx.lineTo(5,-52); ctx.lineTo(14,-44); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(17,-44); ctx.lineTo(21,-53); ctx.lineTo(24,-45); ctx.closePath(); ctx.fill();
+}
+
+const DRAW_FUNS = [drawFox, drawDog, drawCat, drawDonkey, drawWolf, drawMole, drawLeopard];
 
 function drawAnimalSprite(cx, groundY, idx, runT, onGround) {
   const t    = runT * Math.PI * 2;
@@ -3122,7 +3707,8 @@ function drawRocketSprite(p) {
 }
 
 function drawPlayers() {
-  for (const p of players) {
+  for (let pi = 0; pi < players.length; pi++) {
+    const p = players[pi];
     if (p.invFrames > 0 && Math.floor(p.invFrames / 7) % 2 === 1) continue;
     if (p.rocketFrames > 0) {
       drawRocketSprite(p);
@@ -3165,18 +3751,32 @@ function drawPlayers() {
       ctx.fillStyle = `hsl(${50 + 70 * ratio},100%,55%)`;
       ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 18, barW * ratio, 5);
     }
-    if (p.animalIdx === 4 && p.wolfCooldown > 0) {
-      const barW = 36, ratio = 1 - p.wolfCooldown / 288;
-      ctx.fillStyle = 'rgba(0,0,0,0.35)';
-      ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 18, barW, 5);
-      ctx.fillStyle = `hsl(${220 + 60 * ratio},80%,65%)`;
-      ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 18, barW * ratio, 5);
+    if (p.animalIdx === 4) {
+      // Charge dots (max 2)
+      for (let ci = 0; ci < 2; ci++) {
+        ctx.fillStyle = ci < p.wolfCharges ? '#aaddff' : 'rgba(0,0,0,0.35)';
+        ctx.beginPath(); ctx.arc(p.x - 7 + ci * 14, p.y - PLAYER_SIZE - 22, 5, 0, Math.PI * 2); ctx.fill();
+      }
+      if (p.wolfCooldown > 0) {
+        const barW = 36, ratio = 1 - p.wolfCooldown / 300;
+        ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 14, barW, 4);
+        ctx.fillStyle = `hsl(${200 + 40 * ratio},80%,65%)`;
+        ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 14, barW * ratio, 4);
+      }
     }
     if (p.animalIdx === 3 && p.donkeyBoxCD > 0) {
       const barW = 36, ratio = 1 - p.donkeyBoxCD / 300;
       ctx.fillStyle = 'rgba(0,0,0,0.35)';
       ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 18, barW, 5);
       ctx.fillStyle = `hsl(${30 + 60 * ratio},90%,55%)`;
+      ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 18, barW * ratio, 5);
+    }
+    if (p.animalIdx === 6 && p.leopardCooldown > 0) {
+      const barW = 36, ratio = 1 - p.leopardCooldown / 300;
+      ctx.fillStyle = 'rgba(0,0,0,0.35)';
+      ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 18, barW, 5);
+      ctx.fillStyle = `hsl(${45 + 15 * ratio},100%,55%)`;
       ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 18, barW * ratio, 5);
     }
     if (p.animalIdx === 5) {
@@ -3199,6 +3799,24 @@ function drawPlayers() {
         ctx.textAlign = 'center';
         ctx.fillText(p.moleBoxes, p.x, p.y - PLAYER_SIZE - 22);
       }
+    }
+    if (morphFrames[pi] > 0) {
+      // Rainbow aura around morphed player
+      const hue = (frame * 4) % 360;
+      ctx.save();
+      ctx.shadowColor = `hsl(${hue},100%,60%)`; ctx.shadowBlur = 18;
+      ctx.strokeStyle = `hsl(${hue},100%,70%)`; ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.ellipse(p.x, p.y - PLAYER_SIZE * 0.5, PLAYER_SIZE * 0.6, PLAYER_SIZE * 0.6, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.restore();
+      // Remaining time bar
+      const barW = 36, ratio = morphFrames[pi] / 600;
+      ctx.fillStyle = 'rgba(0,0,0,0.35)';
+      ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 26, barW, 5);
+      ctx.fillStyle = `hsl(${(frame * 4) % 360},100%,60%)`;
+      ctx.fillRect(p.x - barW / 2, p.y - PLAYER_SIZE - 26, barW * ratio, 5);
     }
     if (swapFrames > 0) {
       // Circular arrow icon above player to indicate swapped abilities
@@ -3317,6 +3935,22 @@ function drawHUD() {
     ctx.fillStyle = '#dd88ff';
     ctx.font = 'bold 13px Arial'; ctx.textAlign = 'left';
     ctx.fillText(`🔀 Tausch  ${secs}s`, 22, yOff + 18);
+  }
+  for (let pi = 0; pi < players.length; pi++) {
+    if (morphFrames[pi] > 0) {
+      const secs = Math.ceil(morphFrames[pi] / 60);
+      const hasOther = clockFrames > 0 || hourglassFrames > 0 || swapFrames > 0;
+      const yOff = hasOther ? 84 : 52;
+      const xOff = twoPlayer && pi === 1 ? W - 154 : 14;
+      const hue  = (frame * 4) % 360;
+      ctx.fillStyle = 'rgba(0,0,0,0.45)';
+      rrect(xOff, yOff, 140, 26, 6); ctx.fill();
+      ctx.fillStyle = `hsl(${hue},100%,70%)`;
+      ctx.font = 'bold 13px Arial';
+      ctx.textAlign = xOff === 14 ? 'left' : 'left';
+      const label = twoPlayer ? `P${pi + 1}: ` : '';
+      ctx.fillText(`🎭 ${label}${ANIMALS[players[pi].animalIdx].name}  ${secs}s`, xOff + 8, yOff + 18);
+    }
   }
 
   // Virtual buttons (mobile only)
